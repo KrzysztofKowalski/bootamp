@@ -1,0 +1,31 @@
+# build directories
+build/
+build_*/
+
+# cmake & compiler artifacts
+CMakeUserPresets.json
+compile_commands.json
+.cache/
+
+# clangd / IDE
+.clangd/
+.vscode/
+.idea/
+
+# golden regeneration output (kept under golden/ but not the dump scratch)
+golden/*.tmp
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*~
+
+# build log
+build.log
+
+# private / excluded files not part of the public tree
+NOTES.md
+PORT.md
+cliamp/
+tee
+official/
