@@ -19,6 +19,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -85,6 +86,10 @@ public:
   // the analyze callback the band modes stay silent. Thread-safe; may be
   // called at any time (also while run() is active).
   void set_tick_context(VisTickContext ctx);
+  // focused returns the DECSET 1004 focus state (false while the terminal
+  // window is invisible). The wiring agent mirrors it into the tick context
+  // so the tick loop idles while unfocused. Thread-safe (atomic load).
+  bool focused() const { return focused_.load(); }
 
 #if BOOTAMP_HAS_FTXUI
   // set_overlay_component installs the screens composite (queue/help/browse/
@@ -120,6 +125,11 @@ public:
   struct PlaylistSnapshot {
     std::uint64_t revision = 0;  // Playlist::revision() when built
     std::vector<std::string> titles;  // display names, playlist order
+    // albums[i] is track i's album (playlist::Track::album), empty when the
+    // track has none. May be shorter than titles: tracks past its end (hosts
+    // that do not feed album metadata) are treated as album-less and render
+    // without headers, so an unwired provider keeps the panel unchanged.
+    std::vector<std::string> albums;
     int current_index = -1;  // active track row, -1 when none
   };
   // PlaylistProvider supplies the snapshot on demand, revision-keyed: the
@@ -134,6 +144,15 @@ public:
   // Must be called before run(); the snapshot cache it feeds is guarded by
   // grid_mu_ and refreshed on both threads above.
   void set_playlist_provider(PlaylistProvider provider);
+  // set_album_headers toggles the dim "── {album} ──" run headers in the
+  // playlist panel (default off: plain numbered rows). The host calls it from
+  // its key dispatch on the FTXUI loop thread (ctrl+h); the flag is atomic —
+  // the same pattern as fullscreen_/screen_visible_ — because the tick thread
+  // also reads it in playlist_panel_rows (the vis height must match the panel
+  // height, album headers included). Thread-safe; may be called at any time.
+  void set_album_headers(bool on);
+  // album_headers returns the toggle state (false until set_album_headers).
+  bool album_headers() const;
 
 private:
 #if BOOTAMP_HAS_FTXUI
@@ -145,28 +164,68 @@ private:
   // document builds the frame Element: vis canvas + status/help lines (or
   // the too-small hint). Called on the loop thread per repaint.
   ftxui::Element document();
-  // draw_grid blits the latest CellGrid into the frame's Canvas (fresh canvas
-  // per frame; space cells skipped — a blank canvas is all spaces).
+  // draw_grid blits the latest CellGrid into the persistent canvas_ (loop
+  // thread, under grid_mu_): only cells that changed since prev_ are drawn —
+  // the canvas outlives the frame, so unchanged cells stay, cells cleared to
+  // a space are overwritten with a space glyph, and a size change redraws
+  // everything.
   void draw_grid(ftxui::Canvas& canvas);
-  // on_blit runs on the tick thread: sizes the vis to the terminal (ioctl
-  // winsize), stores the grid, and wakes the loop with Event::Custom.
+  // on_blit runs on the tick thread: sizes the vis to the terminal (cached
+  // ioctl winsize), then stores the grid and wakes the loop with
+  // Event::Custom — gated by the focus state (DECSET 1004), a content
+  // fingerprint (identical frames skip the store + post) and a post floor
+  // (the driver's own tick_interval).
   void on_blit(const CellGrid& grid);
   // playlist_panel_rows refreshes the revision-keyed playlist snapshot (see
   // set_playlist_provider) and returns the panel height in terminal rows:
-  // header + up to kPlaylistRows tracks, 1 for an empty playlist, 0 when no
-  // provider is installed. Called from on_blit (tick thread) and document
+  // header + up to kPlaylistRows tracks + album-header rows when
+  // set_album_headers(true) is active, 1 for an empty playlist, 0 when no
+  // provider is installed. The height uses the same window math as
+  // render_playlist so the vis sizing on both threads always reserves exactly
+  // what the panel renders. Called from on_blit (tick thread) and document
   // (loop thread) under grid_mu_.
   int playlist_panel_rows();
   // render_playlist builds the panel Element under the spectrum (Go
   // renderPlaylist): header + a TrackWindow of numbered rows, the current
-  // track highlighted (▶ marker + bold green); empty playlist → a hint.
-  // Loop thread, under grid_mu_.
+  // track highlighted (▶ marker + bold green); with album headers enabled
+  // (set_album_headers) a dim "── {album} ──" row opens each album run
+  // inside the window; empty playlist → a hint. Loop thread, under grid_mu_.
   ftxui::Element render_playlist(int cols);
+  // vis_canvas returns the vis canvas Element for the given area (pixels =
+  // cols*2 x rows*4), drawn from the persistent canvas_ member via the dirty
+  // blit (draw_grid). Loop thread.
+  ftxui::Element vis_canvas(int vis_cols, int vis_rows);
+  // help_line returns the cached dim help hint Element, rebuilt only when the
+  // clip width changes. Loop thread.
+  ftxui::Element help_line(int cols);
+  // status_element returns the status line Element, rebuilt only when the
+  // provider output (or the clip width) changed. Loop thread.
+  ftxui::Element status_element(int cols);
+  // min_post_interval returns the driver's current cadence — the same
+  // vis_.tick_interval(ctx) the TickLoop sleeps on — from the ctx copy cached
+  // in set_tick_context: the post floor for on_blit. Tick thread.
+  std::chrono::milliseconds min_post_interval();
 
   // screen_ is set by run() on the loop thread and read by the tick thread
   // (on_blit); valid only while run() is inside App::Loop.
   std::atomic<ftxui::App*>               screen_{nullptr};
   std::shared_ptr<ftxui::ComponentBase> overlay_;
+  // Persistent vis canvas (loop thread only): reused across repaints so the
+  // dirty blit (draw_grid) only DrawText's changed cells — a fresh canvas per
+  // frame would blank every unchanged cell. Recreated on size change in
+  // vis_canvas(); wiped on vis-off (`o`) so the frame goes blank.
+  ftxui::Canvas canvas_;
+  // Element caches (loop thread only): help/status Elements are rebuilt only
+  // when their clip width, or (status) the provider output, changed.
+  ftxui::Element help_el_;
+  int            help_clip_cols_ = -1;
+  ftxui::Element status_el_;
+  std::string    last_status_;
+  int            last_status_cols_ = -1;
+  // resize hook dedup (loop thread only): resize_hook_ fires only when the
+  // terminal size actually changed.
+  int last_hook_cols_ = -1;
+  int last_hook_rows_ = -1;
 #endif
 
   Visualizer&              vis_;
@@ -177,16 +236,39 @@ private:
   std::mutex        grid_mu_;
   CellGrid          latest_;
   bool              has_grid_ = false;
+  // Dirty-blit state: prev_ is the last grid drawn to canvas_ (same lock as
+  // latest_/has_grid_); a dims mismatch forces a full redraw.
+  CellGrid          prev_;
   std::atomic<bool> fullscreen_{false};
   std::atomic<bool> quit_{false};
   std::atomic<bool> screen_visible_{false};
   ResizeHook        resize_hook_;
+  // Focus tracking (DECSET 1004): written on the loop thread (on_event), read
+  // on the tick thread (on_blit) — atomic, same pattern as fullscreen_.
+  std::atomic<bool> focused_{true};
+  // Vis-off (`o`) restore state (loop thread only).
+  VisMode           saved_vis_mode_ = VisMode::None;
+  // Post gate (tick thread only): the last content fingerprint actually
+  // posted and when, so identical frames skip the store + repaint post and
+  // posts are floored to the driver cadence. ~0 = "never posted" sentinel.
+  std::uint64_t                        last_posted_fp_ = ~std::uint64_t{0};
+  std::chrono::steady_clock::time_point last_post_at_{};
+  // Cached tick context copy (any thread, under ctx_mu_): on_blit derives the
+  // post floor from it. Updated in set_tick_context — the same call that
+  // feeds the TickLoop, so it stays as fresh as the loop's own ctx.
+  std::mutex     ctx_mu_;
+  VisTickContext tick_ctx_;
 
   // Playlist panel feed + revision-keyed snapshot cache (both guarded by
   // grid_mu_: playlist_panel_rows/refresh runs on the tick thread in on_blit
   // and on the loop thread in document(), render_playlist on the loop thread).
   PlaylistProvider playlist_provider_;
   std::optional<PlaylistSnapshot> playlist_snap_;
+  // Album run headers in the playlist panel (set_album_headers). Written on
+  // the loop thread by the host; read on the loop thread (render_playlist)
+  // and the tick thread (playlist_panel_rows in on_blit), hence atomic — no
+  // extra mutex, same access pattern as fullscreen_/screen_visible_.
+  std::atomic<bool> album_headers_{false};
 };
 
 }  // namespace bootamp::ui

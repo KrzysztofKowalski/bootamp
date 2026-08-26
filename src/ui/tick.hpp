@@ -19,12 +19,15 @@
 
 namespace bootamp::ui {
 
-// Tick cadence constants (cliamp TickFast/TickSlow/TickAnim/TickWave/TickAnalyze).
-inline constexpr std::chrono::milliseconds kTickFast    {16};   // ~60 FPS
-inline constexpr std::chrono::milliseconds kTickSlow    {200};
-inline constexpr std::chrono::milliseconds kTickAnim    {33};   // ~30 FPS animation
-inline constexpr std::chrono::milliseconds kTickWave    {16};   // raw-sample modes
-inline constexpr std::chrono::milliseconds kTickAnalyze {50};   // FFT cadence
+// Tick cadence constants (cliamp TickFast/TickSlow/TickAnim/TickWave/
+// TickAnalyze/TickIdle; kTickSpectrum is Go TickFast).
+inline constexpr std::chrono::milliseconds kTickFast     {16};   // ~60 FPS: raw-sample modes + tick-loop refresher
+inline constexpr std::chrono::milliseconds kTickSpectrum {50};   // 20 FPS: spectrum/band modes while playing (Go TickFast)
+inline constexpr std::chrono::milliseconds kTickSlow     {200};
+inline constexpr std::chrono::milliseconds kTickAnim     {33};   // ~30 FPS animation
+inline constexpr std::chrono::milliseconds kTickWave     {16};   // raw-sample modes (Go TickAnim/TickWave)
+inline constexpr std::chrono::milliseconds kTickAnalyze  {33};   // FFT cadence (Go TickAnalyze)
+inline constexpr std::chrono::milliseconds kTickIdle     {1500}; // fully idle cadence (Go TickIdle)
 
 // TickLoop drives the visualizer at the driver-selected cadence. The blit
 // callback is invoked on the tick thread with the freshly-rendered CellGrid;

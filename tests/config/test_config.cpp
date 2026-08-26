@@ -51,9 +51,6 @@ void write_config(const fs::path& dir, std::string_view body) {
   out.write(body.data(), static_cast<std::streamsize>(body.size()));
 }
 
-// unset_env removes an env var (for $ENV interpolation tests that must start clean).
-void unset_env(const char* name) { ::setenv(name, "", 1); }
-
 }  // namespace
 
 // ---- default_config ------------------------------------------------------

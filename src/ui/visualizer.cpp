@@ -440,6 +440,13 @@ std::chrono::milliseconds Visualizer::tick_interval(const VisTickContext& ctx) c
     return kTickSlow;
   }
   if (ctx.paused) {
+    // cliamp model.tickInterval: once the paused visualizer's content has
+    // fully decayed to rest (no band content left to ease down), drop to the
+    // fully-idle cadence (TickIdle); while decay is still pending keep the
+    // slow cadence so the bars fall smoothly.
+    if (!paused_decay_pending(ctx)) {
+      return kTickIdle;
+    }
     return kTickSlow;
   }
   return driver->tick_interval(ctx);

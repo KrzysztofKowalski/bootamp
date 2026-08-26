@@ -203,18 +203,15 @@ public:
       return kTickSlow;
     }
     if (ctx.playing || animating()) {
-      return frame_interval();
+      // Go model.tickInterval: band modes run at TickFast (50ms = kTickSpectrum)
+      // while playing (classicLED's own 30 FPS frameInterval only applies at
+      // the driver level, which the model overrides while playing).
+      return kTickSpectrum;
     }
     return kTickSlow;
   }
 
 private:
-  // frameInterval: time.Second / classicLEDFPS = 33.33ms. C++ milliseconds
-  // truncate to 33ms (== kTickAnim, the ~30 FPS animation tier).
-  static std::chrono::milliseconds frame_interval() {
-    return std::chrono::milliseconds(1000 / kLedFPS);
-  }
-
   // levels (Go levels()): the analysis bands resampled to the bar count.
   std::vector<double> levels() const {
     return resample_bands_linear(last_bands_, led_bar_count(panel_width()));

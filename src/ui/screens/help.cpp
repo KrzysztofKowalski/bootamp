@@ -53,11 +53,14 @@ void clamp_scroll(int& cursor, int& scroll, int count, int visible) {
   }
 }
 
-// The global keybinding table — port of the commandRegistry Keymap=true rows
-// (Go command_registry.go), in registry order, deduped by key+action like Go
-// buildKeymapEntries. bootamp's queue-screen keys (s shuffle, r repeat,
-// f favorite, d remove, c clear, enter play) are screen-local and listed in
-// queue.hpp; the global table below matches Go 1:1.
+// The global keybinding table — the commandRegistry Keymap=true rows (Go
+// command_registry.go) that are implemented in bootamp, in registry order,
+// deduped by key+action like Go buildKeymapEntries. bootamp's queue-screen
+// keys (s shuffle, r repeat, f favorite, d remove, c clear, enter play) are
+// screen-local and listed in queue.hpp. Out-of-MVP rows are dropped (the
+// non-radio providers S/P/C/M/J/E/B/Q/T, provider browser N, o/p/y/t,
+// Ctrl+V/S/X, Tab) and labels reflect bootamp's behavior (Y = YouTube
+// search, Esc = close screen, Up Down = scroll/EQ adjust).
 std::vector<HelpEntry> build_entries() {
   std::vector<HelpEntry> out;
   const auto add = [&out](std::string key, std::string action) {
@@ -83,11 +86,9 @@ std::vector<HelpEntry> build_entries() {
   add("r", "Cycle repeat");
   add("m", "Toggle mono");
   add("e", "Cycle EQ preset");
-  add("t", "Choose theme");
   add("v", "Cycle visualizer");
-  add("Ctrl+V", "Choose visualizer");
   add("V", "Full-screen visualizer");
-  add("Up Down", "Playlist scroll / EQ adjust (wraps around)");
+  add("Up Down", "Playlist scroll / EQ adjust");
   add("PgUp PgDn / Ctrl+U D", "Scroll playlist/browser by page");
   add("Home End / g G", "Go to top/end of playlist/browser");
   add("Shift+Up Down", "Move track up/down");
@@ -95,36 +96,20 @@ std::vector<HelpEntry> build_entries() {
   add("Enter", "Play selected track");
   add("a", "Toggle queue (play next)");
   add("A", "Queue manager");
-  add("x", "Remove selected track from playlist");
-  add("w", "Write selected track/selection to playlist");
-  add("o", "Open file browser");
-  add("N", "Provider browser");
+  add("x", "Remove selected track");
+  add("w", "Write track to playlist");
   add("L", "Browse local playlists");
   add("R", "Open radio provider");
-  add("S", "Open Spotify provider");
-  add("P", "Open Plex provider");
-  add("Y", "Open YouTube provider");
-  add("C", "Open SoundCloud provider");
-  add("M", "Open NetEase provider");
-  add("J", "Open Jellyfin provider");
-  add("E", "Open Emby provider");
-  add("B", "Open Audiobookshelf provider");
-  add("Q", "Open Qobuz provider");
-  add("T", "Open Tidal provider");
+  add("Y", "Open YouTube search");
   add("Ctrl+J", "Jump to time");
-  add("p", "Playlist manager");
   add("Ctrl+H", "Toggle album headers");
-  add("i", "Track info / metadata");
-  add("Ctrl+S", "Save/download track to ~/Music/cliamp");
-  add("Ctrl+X", "Expand/collapse view");
+  add("i", "Track info");
   add("/", "Filter/search list");
   add("f", "Toggle bookmark/favorite");
   add("Ctrl+F", "Search active provider or YouTube");
   add("u", "Load URL (stream/playlist)");
   add("d", "Audio device picker");
-  add("y", "Show lyrics");
-  add("Tab", "Toggle focus");
-  add("Esc", "Back to provider");
+  add("Esc", "Close screen");
   add("Ctrl+K", "Help");
   add("?", "Help");
   add("q", "Quit");

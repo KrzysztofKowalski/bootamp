@@ -473,17 +473,19 @@ void BrowseModel::net_cursor_down() {
 }
 
 void BrowseModel::net_select_cursor() {
-  // Go handleNetSearchResultsKey enter: queue+play the selected result, then
-  // close the net-search overlay (the host's search-close detection restores
-  // the catalog list).
+  // Go handleNetSearchResultsKey enter: play the selected result, then close
+  // the net-search overlay (the host's search-close detection restores the
+  // catalog list). The FULL resolved track is passed — path/title/artist/
+  // duration come straight from resolve_ytdl, not just the URL (Go
+  // playTrackImmediate(track), cliamp/ui/model/keys.go:1515-1532).
   if (net_results_.empty() || net_cursor_ < 0 ||
       net_cursor_ >= static_cast<int>(net_results_.size())) {
     return;
   }
   // Copy: close_search() below clears net_results_.
   const playlist::Track t = net_results_[static_cast<std::size_t>(net_cursor_)];
-  if (actions_.on_select) {
-    actions_.on_select(t.path);
+  if (actions_.on_play_track) {
+    actions_.on_play_track(t);
   }
   close_search();
 }
@@ -497,9 +499,23 @@ bool BrowseModel::handle_key(std::string_view key) {
     }
     if (!net_results_.empty()) {
       // Net-search results navigation (Go handleNetSearchResultsKey): enter
-      // selects the highlighted result; up/down move the cursor.
+      // plays the highlighted result, a appends it, up/down move the cursor.
       if (key == "enter") {
         net_select_cursor();
+        return true;
+      }
+      if (key == "a") {
+        // Go handleNetSearchResultsKey "a": appendTrack(track). Unlike Go
+        // (closeNetSearch before append), the results stay open so several
+        // tracks can be appended in one pass; esc/enter leave the screen.
+        if (net_cursor_ >= 0 &&
+            net_cursor_ < static_cast<int>(net_results_.size())) {
+          const playlist::Track t =
+              net_results_[static_cast<std::size_t>(net_cursor_)];
+          if (actions_.on_append_track) {
+            actions_.on_append_track(t);
+          }
+        }
         return true;
       }
       if (key == "up" || key == "k") {
@@ -508,6 +524,17 @@ bool BrowseModel::handle_key(std::string_view key) {
       }
       if (key == "down" || key == "j") {
         net_cursor_down();
+        return true;
+      }
+      // Go handleNetSearchResultsKey: typing is ignored while results are
+      // shown (the handler's default does nothing) — consume printable keys,
+      // space and backspace so they can't fall through to the host's
+      // search-input path (main.cpp app_key step 2) and edit the query.
+      // q is deliberately NOT bound here: Go queues the track next
+      // (keys.go:1527), bootamp leaves q to the global quit key.
+      if (key != "q" &&
+          ((key.size() == 1 && key[0] >= 0x21 && key[0] <= 0x7E) ||
+           key == "space" || key == "backspace")) {
         return true;
       }
     }
@@ -698,8 +725,26 @@ std::shared_ptr<ftxui::ComponentBase> make_browse_component(BrowseModel& model) 
   // headers are interleaved when the section changes.
   auto entries  = std::make_shared<std::vector<std::string>>();
   auto selected = std::make_shared<int>(0);
-  auto menu = ftxui::Menu(entries.get(), selected.get(),
-                          ftxui::MenuOption::Vertical());
+  auto option = ftxui::MenuOption::Vertical();
+  // The app renders the cursor marker itself (row_label/net_row_label, Go
+  // providerRowStyle "> "); the Menu's built-in "> " prefix (the default
+  // Vertical transform prepends it on the Menu's selected index) duplicated
+  // it, and on a different row whenever section headers shifted the Menu's
+  // index space vs the model's. Suppress the prefix so exactly one marker
+  // exists, on the model cursor's row. state.focused (inverted) is dropped
+  // too: the host routes keys to the model, so the Menu never moves its own
+  // focused_entry and its highlight would stick to the first row. The active
+  // row keeps the inverted+bold highlight (now on the correct row).
+  option.entries_option.transform = [](const ftxui::EntryState& state) {
+    ftxui::Element e = ftxui::text(state.label);
+    if (state.active) {
+      e = e | ftxui::inverted | ftxui::bold;
+    } else {
+      e = e | ftxui::dim;
+    }
+    return e;
+  };
+  auto menu = ftxui::Menu(entries.get(), selected.get(), std::move(option));
 
   auto renderer = ftxui::Renderer(menu, [&model, search_input, entries, selected, menu] {
     // Merge a completed background catalog fetch (no-op unless one landed).
@@ -718,15 +763,27 @@ std::shared_ptr<ftxui::ComponentBase> make_browse_component(BrowseModel& model) 
     } else if (n > 0) {
       const int width = 80;
       std::string last_section;
+      // Menu coordinates, not model coordinates: section headers are Menu
+      // entries too, so the cursor row's Menu index is its model index minus
+      // scroll plus the headers emitted in between. Track it while building
+      // the entries so the Menu's selected (focus/scroll placement, and the
+      // active-row styling above) follows the model cursor exactly.
+      int menu_index  = 0;  // index of the next entry pushed
+      int cursor_menu = 0;  // menu index of the model cursor row
       for (int i = model.scroll(); i < n; ++i) {
         const std::string sec = model.section_label(i);
         if (!sec.empty() && sec != last_section) {
           entries->push_back("── " + sec + " ──");
           last_section = sec;
+          ++menu_index;
+        }
+        if (i == model.cursor()) {
+          cursor_menu = menu_index;
         }
         entries->push_back(model.row_label(i, width));
+        ++menu_index;
       }
-      *selected = std::max(0, model.cursor() - model.scroll());
+      *selected = std::max(0, cursor_menu);
     }
     std::vector<ftxui::Element> lines = {
         ftxui::text(model.net_results_active() ? model.net_header_label()

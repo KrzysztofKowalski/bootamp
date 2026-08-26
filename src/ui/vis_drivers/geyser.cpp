@@ -259,11 +259,12 @@ public:
   }
 
   std::chrono::milliseconds tick_interval(const VisTickContext& ctx) const override {
-    // cliamp geyserDriver.TickInterval -> defaultDriverTickInterval.
+    // Go model.tickInterval: band/spectrum modes run at TickFast (50ms =
+    // kTickSpectrum) while playing; slow when stopped or under an overlay.
     if (ctx.overlay_active || !ctx.playing) {
       return kTickSlow;
     }
-    return kTickFast;
+    return kTickSpectrum;
   }
 
 private:

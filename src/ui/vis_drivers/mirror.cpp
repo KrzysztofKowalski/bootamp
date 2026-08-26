@@ -97,14 +97,13 @@ public:
 
   std::chrono::milliseconds
   tick_interval(const VisTickContext& ctx) const override {
-    // Go renderOnlyDriver with tickDuration = TickAnim (16ms, ~60 FPS
-    // animation — the C++ fast tier): playing (no overlay) animates, else the
-    // default cadence.
+    // Go model.tickInterval: band/spectrum modes run at TickFast (50ms =
+    // kTickSpectrum) while playing; slow when stopped or under an overlay.
     if (ctx.overlay_active) {
       return kTickSlow;
     }
     if (ctx.playing) {
-      return kTickFast;
+      return kTickSpectrum;
     }
     return kTickSlow;
   }

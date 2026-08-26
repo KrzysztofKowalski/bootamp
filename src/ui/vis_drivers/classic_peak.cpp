@@ -225,7 +225,10 @@ std::chrono::milliseconds ClassicPeakDriver::tick_interval(
     return kTickSlow;
   }
   if (ctx.playing || animating_) {
-    return frame_interval();
+    // Go model.tickInterval: band modes run at TickFast (50ms = kTickSpectrum)
+    // while playing (classicPeak's own frameInterval only applies at the
+    // driver level, which the model overrides while playing).
+    return kTickSpectrum;
   }
   return kTickSlow;
 }
@@ -352,15 +355,6 @@ ClassicPeakDriver::render_state(std::span<const float> bands) const {
     return {levels, levels};
   }
   return {bar_pos_, peak_pos_};
-}
-
-std::chrono::milliseconds ClassicPeakDriver::frame_interval() const {
-  // Go frameInterval: rows start at DefaultVisRows and only grow.
-  const int rows = std::max(rows_, kDefaultVisRows);
-  double fps = kClassicPeakLaunchMax * static_cast<double>(rows * 4);
-  fps = std::clamp(fps, kClassicPeakMinFPS, kClassicPeakMaxFPS);
-  return std::chrono::milliseconds(
-      static_cast<std::int64_t>(1000.0 / fps));  // Go: time.Second/fps, truncated
 }
 
 std::unique_ptr<VisDriver> make_classic_peak_driver() {

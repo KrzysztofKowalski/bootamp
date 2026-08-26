@@ -81,6 +81,11 @@ void TickLoop::loop(std::stop_token stoken) {
       // driver's interval; kTickSlow when paused or no driver. A degenerate
       // (<= 0) interval is clamped so a bad driver cannot busy-spin the loop.
       interval = vis_.tick_interval(ctx);
+      // Unfocused (focus-out): no one is looking — fall to the idle cadence
+      // so analyze+render (and the discarded blit) run at most every 1.5s.
+      if (!ctx.focused && interval < kTickIdle) {
+        interval = kTickIdle;
+      }
       if (interval <= std::chrono::milliseconds::zero()) {
         interval = kTickFast;
       }

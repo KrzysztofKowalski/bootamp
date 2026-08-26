@@ -237,6 +237,15 @@ target_link_libraries(bootamp_resolve    INTERFACE bootamp_playlist bootamp_audi
 target_link_libraries(bootamp_provider    INTERFACE bootamp_playlist bootamp_resolve)
 target_link_libraries(bootamp_ui          INTERFACE bootamp_dsp bootamp_audio bootamp_resolve)
 
+# --- SIMD kernel tagging ------------------------------------------------------
+# Files containing AVX2/FMA kernels (all compiled into bootamp_dsp, which every
+# consumer links). bootamp_avx2_kernel tags them for the per-file -mavx2 -mfma
+# that BOOTAMP_AVX2_STRICT adds — a no-op when the option is OFF.
+bootamp_avx2_kernel(bootamp_dsp
+  src/dsp/biquad.cpp
+  src/dsp/volume.cpp
+  src/dsp/wsola.cpp)
+
 # --- Tests (Catch2, header-only — no linking of app code needed) -------------
 enable_testing()
 file(GLOB TEST_FOUNDATION_SRCS CONFIGURE_DEPENDS
@@ -267,6 +276,10 @@ function(bootamp_test name srcs libs)
   add_executable(${name} ${srcs})
   target_include_directories(${name} PRIVATE ${BOOTAMP_COMMON_INCLUDES})
   target_link_libraries(${name} PRIVATE Catch2::Catch2WithMain ${libs})
+  # Tests build config structs with C++20 designated initializers that
+  # intentionally omit trailing members; -Wmissing-field-initializers is noise
+  # there. Suppress it for TEST targets only — src/ keeps the warning.
+  target_compile_options(${name} PRIVATE -Wno-missing-field-initializers)
   if(BOOTAMP_ENABLE_TSAN)
     target_compile_options(${name} PRIVATE -fsanitize=thread -g)
     target_link_options(${name}    PRIVATE -fsanitize=thread)

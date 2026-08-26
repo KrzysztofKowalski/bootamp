@@ -37,7 +37,10 @@
 // Composition: search Input (when search_active), a Menu that renders the
 // sectioned provider list — or, while net_results_active(), the net-search
 // results list (Go renderNetSearchBody) in its place — and a loading line
-// while the catalog pages in.
+// while the catalog pages in. The cursor marker lives in the model's
+// row_label/net_row_label ("> ", Go providerRowStyle); the Menu's built-in
+// "> " prefix is suppressed and its selected index is kept on the cursor
+// row in menu coordinates, so exactly one marker exists.
 namespace ftxui {
 class ComponentBase;
 }
@@ -56,6 +59,16 @@ struct BrowseActions {
   std::function<void(std::string_view id)> on_favorite{};
   // Search submitted (Catalog/YouTube/SoundCloud) — host may surface status.
   std::function<void(std::string_view query)> on_search_submitted{};
+  // enter on a net-search result → host plays the FULL resolved Track (Go
+  // handleNetSearchResultsKey enter: playTrackImmediate(track) —
+  // cliamp/ui/model/keys.go:1515-1532). resolve_ytdl fills
+  // path/title/artist/duration, so the host gets the real track, not just
+  // the URL.
+  std::function<void(const playlist::Track&)> on_play_track{};
+  // a on a net-search result → host appends the full resolved Track to the
+  // queue (Go handleNetSearchResultsKey "a": appendTrack(track) —
+  // cliamp/ui/model/keys.go:1515-1532).
+  std::function<void(const playlist::Track&)> on_append_track{};
 };
 
 // BrowseModel shows a provider's playlist list with section headers, lazy
@@ -171,14 +184,18 @@ public:
   int  net_scroll() const { return net_scroll_; }
   void net_cursor_up();    // wrap
   void net_cursor_down();  // wrap
-  // net_select_cursor — Go handleNetSearchResultsKey enter: on_select on the
-  // result's path (url), then close_search() (back to the catalog list).
+  // net_select_cursor — Go handleNetSearchResultsKey enter: on_play_track on
+  // the result's full Track (path/title/artist/duration from resolve_ytdl,
+  // not just the URL), then close_search() (back to the catalog list).
   void net_select_cursor();
   bool net_results_active() const { return !net_results_.empty(); }
 
   // handle_key dispatches a Bubbletea-style key name; returns true if the
   // browse screen consumed it. Search input text is fed via set_search_query
-  // (host text-editor keys handled there); Enter/Esc are handled here.
+  // (host text-editor keys handled there); Enter/Esc are handled here. While
+  // net-search results are shown, typing (printable/space/backspace) is
+  // consumed and ignored — Go handleNetSearchResultsKey ignores typing — so
+  // keystrokes can't edit the search query.
   bool handle_key(std::string_view key);
 
   // --- Rendering data (Go renderProviderList) -----------------------------

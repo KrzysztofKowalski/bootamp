@@ -99,12 +99,12 @@ public:
             std::span<const float>) override {}
 
   std::chrono::milliseconds tick_interval(const VisTickContext& ctx) const override {
-    // cliamp newFastRenderOnlyDriver(TickAnim): fast while playing, slow when
-    // stopped or under an overlay (Go renderOnlyDriver.TickInterval).
+    // Go model.tickInterval: band/spectrum modes run at TickFast (50ms =
+    // kTickSpectrum) while playing; slow when stopped or under an overlay.
     if (ctx.overlay_active || !ctx.playing) {
       return kTickSlow;
     }
-    return kTickFast;
+    return kTickSpectrum;
   }
 };
 

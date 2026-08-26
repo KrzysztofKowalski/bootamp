@@ -37,6 +37,8 @@ public:
   void set_mode(VisMode mode);
   // mode_name returns the active mode's display name.
   std::string mode_name() const;
+  // mode returns the active VisMode (VisMode::None when switched off via `o`).
+  VisMode mode() const { return mode_; }
   // all_mode_names returns cycle-order names (built-ins).
   std::vector<std::string> all_mode_names() const;
 

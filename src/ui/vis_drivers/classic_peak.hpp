@@ -136,9 +136,6 @@ public:
   // resampled levels while the driver is unseeded (Go renderState).
   std::pair<std::vector<double>, std::vector<double>>
   render_state(std::span<const float> bands) const;
-  // frame_interval derives the redraw interval from the render height,
-  // clamped to [kClassicPeakMinFPS, kClassicPeakMaxFPS] (Go frameInterval).
-  std::chrono::milliseconds frame_interval() const;
 };
 
 }  // namespace bootamp::ui::vis_drivers

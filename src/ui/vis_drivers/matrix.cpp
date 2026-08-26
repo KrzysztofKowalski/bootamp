@@ -156,12 +156,12 @@ public:
   void tick(const VisTickContext&, std::uint64_t&, std::span<const float>) override {}
 
   std::chrono::milliseconds tick_interval(const VisTickContext& ctx) const override {
-    // Go newRenderOnlyDriver: defaultDriverTickInterval — fast while playing
-    // without an overlay, slow otherwise.
+    // Go model.tickInterval: band/spectrum modes run at TickFast (50ms =
+    // kTickSpectrum) while playing; slow when stopped or under an overlay.
     if (ctx.overlay_active || !ctx.playing) {
       return kTickSlow;
     }
-    return kTickFast;
+    return kTickSpectrum;
   }
 };
 

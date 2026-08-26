@@ -165,8 +165,9 @@ public:
       return kTickSlow;
     }
     if (ctx.playing || animating()) {
-      // Go TickAnim (16ms, ~60 FPS animation) — the C++ fast tier.
-      return kTickFast;
+      // Go stereoDriver: raw-sample mode (spectrumAnalysisSpec(0)); the model
+      // keeps raw-sample modes at TickAnim/TickWave (16ms).
+      return kTickWave;
     }
     return kTickSlow;
   }

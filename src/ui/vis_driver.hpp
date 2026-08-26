@@ -26,6 +26,10 @@ struct VisTickContext {
   bool                                  playing       = false;
   bool                                  paused        = false;
   bool                                  overlay_active = false;
+  // focused mirrors the app's DECSET 1004 focus state (default true: players
+  // and headless contexts don't require UI state); the tick loop idles while
+  // false so an invisible window stops re-rendering every frame.
+  bool                                  focused        = true;
   std::function<std::span<const float>(const struct VisAnalysisSpec&)> analyze;
   std::function<std::size_t(std::span<float>)>  waveform_samples_into;  // mono
   std::function<std::size_t(std::span<std::array<float,2>>)> stereo_samples_into;

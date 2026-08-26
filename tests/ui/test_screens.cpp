@@ -104,7 +104,9 @@ struct FakeProvider {
           std::vector<Track> out;
           out.push_back(Track{.path = "https://example.invalid/" +
                                        std::string(query),
-                              .title = "hit for " + std::string(query)});
+                              .title = "hit for " + std::string(query),
+                              .artist = "artist for " + std::string(query),
+                              .duration_secs = 213});
           return out;
         },
         [this](std::string_view id) { return id_prefix(id); },
@@ -506,12 +508,24 @@ TEST_CASE("browse youtube search uses ytsearch10 prefix", "[screens][browse]") {
 
   m.net_cursor_down();
   REQUIRE(m.net_cursor() == 0);  // wraps single result
+  // Enter plays the full resolved track (path/title/artist/duration from
+  // resolve_ytdl), not just the URL — Go handleNetSearchResultsKey enter:
+  // playTrackImmediate(track). on_select is no longer called from the net
+  // path (it stays for radio playlist selects). Snapshot the result first:
+  // net_select_cursor() closes the search, which clears net_results_.
+  const Track first = m.net_results()[0];
+  Track played;
   std::string selected;
-  m.set_actions(BrowseModel::Actions{.on_select = [&](std::string_view id) {
-                                       selected = std::string(id);
-                                     }});
+  m.set_actions(BrowseModel::Actions{
+      .on_select = [&](std::string_view id) { selected = std::string(id); },
+      .on_play_track = [&](const Track& t) { played = t; }});
   m.net_select_cursor();
-  REQUIRE(selected == m.net_results()[0].path);
+  REQUIRE(played.path == first.path);
+  REQUIRE(played.title == first.title);
+  REQUIRE(played.artist == first.artist);
+  REQUIRE(played.duration_secs == first.duration_secs);
+  REQUIRE(selected.empty());       // on_select untouched by net selects
+  REQUIRE(!m.net_results_active());  // close_search() after enter
 }
 
 TEST_CASE("browse soundcloud search uses scsearch10 prefix", "[screens][browse]") {
@@ -523,6 +537,56 @@ TEST_CASE("browse soundcloud search uses scsearch10 prefix", "[screens][browse]"
   REQUIRE(m.submit_search().empty());
   REQUIRE(m.net_results().size() == 1);
   REQUIRE(m.net_results()[0].title == "hit for scsearch10:ambient");
+}
+
+TEST_CASE("browse net results a appends the current track", "[screens][browse]") {
+  // Go handleNetSearchResultsKey "a": appendTrack(track) — the full resolved
+  // track, not just the URL. Unlike Go (closeNetSearch before append), the
+  // results stay open so several tracks can be appended in one pass.
+  FakeProvider fp;
+  fp.lists = {{"l:0", "cliamp radio", 0}};
+  BrowseModel m = fp.make_model();
+  Track appended;
+  m.set_actions(BrowseModel::Actions{
+      .on_append_track = [&](const Track& t) { appended = t; }});
+  REQUIRE(m.refresh().empty());
+
+  m.start_search(BrowseModel::SearchMode::YouTube);
+  m.set_search_query("lofi beats");
+  REQUIRE(m.submit_search().empty());
+  REQUIRE(m.net_results().size() == 1);
+
+  REQUIRE(m.handle_key("a"));
+  REQUIRE(appended.path == m.net_results()[0].path);
+  REQUIRE(appended.title == "hit for ytsearch10:lofi beats");
+  REQUIRE(appended.artist == "artist for ytsearch10:lofi beats");
+  REQUIRE(appended.duration_secs == 213);
+  REQUIRE(m.net_results_active());  // append leaves the results open
+  REQUIRE(m.net_cursor() == 0);
+}
+
+TEST_CASE("browse net results ignore typing and leave q global",
+          "[screens][browse]") {
+  // Go handleNetSearchResultsKey has no text handling: typing on the results
+  // screen does nothing. Bootamp consumes printable/space/backspace so they
+  // can't fall through to the host's search-input path and edit the query;
+  // q is not bound on the results screen and stays the global quit key.
+  FakeProvider fp;
+  fp.lists = {{"l:0", "cliamp radio", 0}};
+  BrowseModel m = fp.make_model();
+  REQUIRE(m.refresh().empty());
+  m.start_search(BrowseModel::SearchMode::YouTube);
+  m.set_search_query("lofi beats");
+  REQUIRE(m.submit_search().empty());
+
+  REQUIRE(m.handle_key("x"));
+  REQUIRE(m.handle_key("space"));  // host key name (ftxui_app_impl.hpp)
+  REQUIRE(m.handle_key("backspace"));
+  REQUIRE(m.search_query() == "lofi beats");  // typing never edited the query
+  REQUIRE(!m.handle_key("q"));                // q falls through to global quit
+  REQUIRE(m.net_results_active());
+  REQUIRE(m.handle_key("esc"));
+  REQUIRE(!m.search_active());
 }
 
 TEST_CASE("browse empty net search query errors", "[screens][browse]") {
