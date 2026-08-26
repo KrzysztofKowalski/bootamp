@@ -82,7 +82,7 @@ TEST_CASE("DefaultConfig has the cliamp defaults", "[config]") {
 
 TEST_CASE("ClampVolume", "[config][clamp]") {
   const std::array<std::pair<double,double>, 5> cases{{
-    {-10, -10}, {-60, -50}, {20, 6}, {-50, -50}, {6, 6},
+    {-10, -10}, {-60, -50}, {20, 24}, {-50, -50}, {24, 24},
   }};
   for (auto [vol, want] : cases) {
     Config c = default_config();

@@ -10,6 +10,7 @@
 #include "provider/radio/radio_internal.hpp"
 
 #include "foundation/appdir.hpp"
+#include "foundation/applog.hpp"
 #include "foundation/fileutil.hpp"
 #include "foundation/tomlutil.hpp"
 
@@ -225,6 +226,36 @@ Provider::toggle_favorite(std::string_view id) {
   auto r = favorites_->add(s);
   if (!r) return std::unexpected{std::move(r).error()};
   return std::pair{true, s.name};
+}
+
+// toggle_favorite_by_url — the main-screen 'f' path (extension over Go, whose
+// main-context 'f' only bookmarks local playlist tracks). The current Track
+// carries no playlist ID, so the station is matched by its stream URL; the
+// persisted entry stores name + url (the optional CatalogStation fields are
+// unknown here and left empty, which save_favorites omits from the TOML).
+std::expected<bool, std::string>
+Provider::toggle_favorite_by_url(std::string_view url, std::string_view name) {
+  std::lock_guard lk(mu_);
+
+  if (url.empty()) {
+    return std::unexpected{"cannot favorite a track without a URL"};
+  }
+  // load_favorite_stations drops entries with an empty name, so fall back to
+  // the URL when the track carries no title (e.g. a bare stream URL).
+  CatalogStation s;
+  s.name = name.empty() ? std::string{url} : std::string{name};
+  s.url  = std::string{url};
+
+  if (favorites_->contains(url)) {
+    auto r = favorites_->remove(url);
+    if (!r) return std::unexpected{std::move(r).error()};
+    foundation::applog::info("radio favorite removed: {} ({})", s.name, url);
+    return false;
+  }
+  auto r = favorites_->add(s);
+  if (!r) return std::unexpected{std::move(r).error()};
+  foundation::applog::info("radio favorite added: {} ({})", s.name, url);
+  return true;
 }
 
 std::expected<int, std::string> Provider::load_catalog_page(int offset, int limit) {

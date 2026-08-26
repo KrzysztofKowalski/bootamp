@@ -1038,7 +1038,7 @@ TEST_CASE("EngineTests: play PCM buffer through NullSink", "[audio][engine]") {
 
   SECTION("controls clamp to their ranges and report back") {
     ba::AudioEngine engine = make_engine();
-    // Volume: clamped to [volume_min, +6]; floor defaults to -50 and raises
+    // Volume: clamped to [volume_min, +24]; floor defaults to -50 and raises
     // the current volume (Go SetVolumeMin).
     REQUIRE(engine.volume() == 0.0);
     engine.set_volume(-80.0);
@@ -1047,8 +1047,8 @@ TEST_CASE("EngineTests: play PCM buffer through NullSink", "[audio][engine]") {
     REQUIRE(engine.volume_min() == -30.0);
     engine.set_volume(-40.0);  // below the floor -> floor
     REQUIRE(engine.volume() == -30.0);
-    engine.set_volume(20.0);   // above +6 -> +6
-    REQUIRE(engine.volume() == 6.0);
+    engine.set_volume(20.0);   // above +24 -> +24
+    REQUIRE(engine.volume() == 24.0);
     engine.set_volume(-3.0);
     REQUIRE(engine.volume() == -3.0);
 

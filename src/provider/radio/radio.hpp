@@ -91,6 +91,15 @@ public:
   std::expected<std::pair<bool, std::string>, std::string>
   toggle_favorite(std::string_view id) override;
 
+  // toggle_favorite_by_url favorites (add) or unfavorites (remove) the station
+  // identified by its stream URL — the main-screen 'f' path, where only the
+  // current Track (url + title) is known, no playlist ID. Persists through
+  // Favorites exactly like toggle_favorite; the favorite entry stores name +
+  // url (the other CatalogStation fields are optional and left empty here).
+  // Returns the new favorite state (true = now favorited, false = removed).
+  std::expected<bool, std::string> toggle_favorite_by_url(std::string_view url,
+                                                          std::string_view name);
+
   // --- CatalogLoader ---
   std::expected<int, std::string> load_catalog_page(int offset, int limit) override;
 

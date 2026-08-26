@@ -23,7 +23,9 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <vector>
 
 #if BOOTAMP_HAS_FTXUI
 // The guarded hooks below use real FTXUI types in declarations, so the
@@ -109,6 +111,30 @@ public:
   using ResizeHook = std::function<void(int cols, int rows)>;
   void set_resize_hook(ResizeHook hook);
 
+  // --- Playlist panel feed (wiring agent; plain C++ surface) ----------------
+  // PlaylistSnapshot is one render's worth of the track list the Vis frame
+  // shows in a panel under the spectrum (Go renderPlaylist: numbered rows,
+  // current track highlighted, sliding window). revision mirrors
+  // Playlist::revision() at snapshot time; current_index is the active
+  // track's playlist row (Playlist::index()), -1 when the playlist is empty.
+  struct PlaylistSnapshot {
+    std::uint64_t revision = 0;  // Playlist::revision() when built
+    std::vector<std::string> titles;  // display names, playlist order
+    int current_index = -1;  // active track row, -1 when none
+  };
+  // PlaylistProvider supplies the snapshot on demand, revision-keyed: the
+  // shell asks once per repaint with the revision it last rendered and the
+  // provider returns nullopt when the playlist is unchanged (one atomic load
+  // in main.cpp — no string copies on the per-frame path); a fresh snapshot
+  // is returned only when the revision moved. Thread-safe: the shell queries
+  // it from both the loop thread (document) and the tick thread (on_blit).
+  using PlaylistProvider = std::function<std::optional<PlaylistSnapshot>(
+      std::uint64_t seen_revision)>;
+  // set_playlist_provider installs the provider (Go station list at startup).
+  // Must be called before run(); the snapshot cache it feeds is guarded by
+  // grid_mu_ and refreshed on both threads above.
+  void set_playlist_provider(PlaylistProvider provider);
+
 private:
 #if BOOTAMP_HAS_FTXUI
   // on_event is the CatchEvent handler: key translation -> dispatch.
@@ -125,6 +151,17 @@ private:
   // on_blit runs on the tick thread: sizes the vis to the terminal (ioctl
   // winsize), stores the grid, and wakes the loop with Event::Custom.
   void on_blit(const CellGrid& grid);
+  // playlist_panel_rows refreshes the revision-keyed playlist snapshot (see
+  // set_playlist_provider) and returns the panel height in terminal rows:
+  // header + up to kPlaylistRows tracks, 1 for an empty playlist, 0 when no
+  // provider is installed. Called from on_blit (tick thread) and document
+  // (loop thread) under grid_mu_.
+  int playlist_panel_rows();
+  // render_playlist builds the panel Element under the spectrum (Go
+  // renderPlaylist): header + a TrackWindow of numbered rows, the current
+  // track highlighted (▶ marker + bold green); empty playlist → a hint.
+  // Loop thread, under grid_mu_.
+  ftxui::Element render_playlist(int cols);
 
   // screen_ is set by run() on the loop thread and read by the tick thread
   // (on_blit); valid only while run() is inside App::Loop.
@@ -144,6 +181,12 @@ private:
   std::atomic<bool> quit_{false};
   std::atomic<bool> screen_visible_{false};
   ResizeHook        resize_hook_;
+
+  // Playlist panel feed + revision-keyed snapshot cache (both guarded by
+  // grid_mu_: playlist_panel_rows/refresh runs on the tick thread in on_blit
+  // and on the loop thread in document(), render_playlist on the loop thread).
+  PlaylistProvider playlist_provider_;
+  std::optional<PlaylistSnapshot> playlist_snap_;
 };
 
 }  // namespace bootamp::ui

@@ -601,7 +601,7 @@ void AudioEngine::set_volume_min(double db) {
 }
 
 void AudioEngine::set_volume(double db) {
-  volume_db_.store(std::clamp(db, volume_min_db_.load(std::memory_order_relaxed), 6.0),
+  volume_db_.store(std::clamp(db, volume_min_db_.load(std::memory_order_relaxed), 24.0),
                    std::memory_order_relaxed);
 }
 

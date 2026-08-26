@@ -9,11 +9,13 @@
 // callback (on_blit) runs on that thread and copies the grid + posts
 // ftxui::Event::Custom to wake the event loop and force a repaint (FTXUI's
 // loop redraws whenever any event is handled). Each repaint re-composes the
-// frame Element: a fresh ftxui::Canvas blitted from the latest grid, then the
-// status line (StatusProvider, one plain-text line, no ANSI — text() renders
-// escapes literally) and a dim help hint, or a centered too-small hint. While
-// a screen (queue/browse/EQ/help) is open — set_screen_visible(true) — the
-// overlay component's Render replaces the canvas (status + help stay).
+// frame Element: a fresh ftxui::Canvas blitted from the latest grid, a
+// playlist panel under the spectrum (Go renderPlaylist — the station list,
+// fed revision-keyed by the host, see set_playlist_provider), the status
+// line (StatusProvider, one plain-text line, no ANSI — text() renders
+// escapes literally) and a dim help hint, or a centered too-small hint.
+// While a screen (queue/browse/EQ/help) is open — set_screen_visible(true) —
+// the overlay component's Render replaces the canvas (status + help stay).
 //
 // Canvas model (FTXUI 7.x): a terminal cell is 2x4 canvas pixels;
 // DrawText(x, y, glyph) maps glyph -> cell (x/2, y/4) and advances x by 2 per
@@ -31,14 +33,18 @@
 // them in-process (v/V are not forwarded — the status provider sees the new
 // mode via vis.mode_name(); q/ctrl+c are forwarded first, then quit()).
 //
-// Layout: vis rows = terminal rows - 2 (status + help) or - 0 in fullscreen
-// mode; canvas pixels = cols*2 x rows*4; too-small (<40x10, Go layout gate)
-// shows the resize hint instead. Terminal size is read with ioctl
-// TIOCGWINSZ on both threads (FTXUI re-reads it too; transiently different
-// reads resolve within one frame).
+// Layout: vis rows = terminal rows - 2 (status + help) - playlist panel
+// (header + up to 8 track rows, or 1 hint row when the playlist is empty)
+// or - 0 in fullscreen mode (V hides the panel too); canvas pixels =
+// cols*2 x rows*4; too-small (<40x10, Go layout gate) shows the resize hint
+// instead. Terminal size is read with ioctl TIOCGWINSZ on both threads
+// (FTXUI re-reads it too; transiently different reads resolve within one
+// frame).
 //
 // Threading: the TickLoop runs visualizer.tick()/render() on its jthread and
-// set_size() is called from on_blit on the same thread. Mode changes
+// set_size() is called from on_blit on the same thread — and once from run()
+// before the loop starts, so render()/tick() do not deadlock on the first
+// frames (a bootstrap sizing that matches on_blit's math). Mode changes
 // (cycle_mode/set_mode) come from the key handler on the loop thread — a
 // benign race on the mode enum/ints (no lock in the contract header; see the
 // task report). The grid passes between threads under grid_mu_; the Canvas is
@@ -54,6 +60,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -198,6 +206,10 @@ TermSize term_size() {
   return out;
 }
 
+// Playlist panel window (Go maxVisibleTracks): the number of track rows shown
+// under the spectrum; the window slides to keep the current track centered.
+inline constexpr int kPlaylistRows = 8;
+
 // Resolve a CellGrid palette slot to an ftxui::Color. Slot 0 (default) is the
 // transparent Color::Default — NOT Palette16::Black (ANSI 0 means the
 // terminal default foreground; mapping it to black would tint everything).
@@ -241,6 +253,34 @@ void FtxuiAppImpl::set_resize_hook(ResizeHook hook) {
   resize_hook_ = std::move(hook);
 }
 
+void FtxuiAppImpl::set_playlist_provider(PlaylistProvider provider) {
+  std::lock_guard<std::mutex> lk(grid_mu_);
+  playlist_provider_ = std::move(provider);
+  playlist_snap_.reset();  // next refresh builds a fresh snapshot
+}
+
+// refresh + panel height, shared by both threads (see the header comment).
+int FtxuiAppImpl::playlist_panel_rows() {
+  std::lock_guard<std::mutex> lk(grid_mu_);
+  if (!playlist_provider_) {
+    return 0;  // no panel installed — the vis keeps the full height
+  }
+  // Revision-keyed refresh: an unchanged playlist costs one atomic load in
+  // the provider (no string copies on the per-repaint path); a moved
+  // revision returns a fresh snapshot which is cached here for render_playlist.
+  const std::uint64_t seen =
+      playlist_snap_ ? playlist_snap_->revision
+                     : std::numeric_limits<std::uint64_t>::max();
+  if (std::optional<PlaylistSnapshot> snap = playlist_provider_(seen)) {
+    playlist_snap_ = std::move(snap);
+  }
+  if (!playlist_snap_ || playlist_snap_->titles.empty()) {
+    return 1;  // hint line only
+  }
+  return 1 + std::min(kPlaylistRows,
+                      static_cast<int>(playlist_snap_->titles.size()));
+}
+
 void FtxuiAppImpl::quit() {
   quit_.store(true);
   if (ftxui::App* s = screen_.load()) {
@@ -263,6 +303,19 @@ void FtxuiAppImpl::run() {
   ftxui::Component component = ftxui::CatchEvent(
       base, [this](const ftxui::Event& e) { return on_event(e); });
 
+  // Size the vis before the tick loop starts: on_blit (the only other
+  // set_size caller) cannot fire until the first render() succeeds, and
+  // render()/tick() early-return while cols_/rows_ are unset — a bootstrap
+  // deadlock. Same sizing math as on_blit (the loop re-sizes each blit),
+  // including the playlist-panel height so the first frame already fits
+  // both the spectrum and the panel.
+  const TermSize ts = term_size();
+  if (ts.cols > 0) {
+    const int vis_rows =
+        fullscreen_.load() ? ts.rows
+                           : std::max(1, ts.rows - 2 - playlist_panel_rows());
+    vis_.set_size(ts.cols, vis_rows);
+  }
   ticks_->start();
   app.Loop(component);  // blocks until Exit()
   ticks_->stop();
@@ -317,10 +370,14 @@ bool FtxuiAppImpl::handle_key_name(const std::string& name) {
 
 void FtxuiAppImpl::on_blit(const CellGrid& grid) {
   // Size the vis to the terminal on the tick thread (set_size must not race
-  // tick()/render()); the loop picks up the new size next iteration.
+  // tick()/render()); the loop picks up the new size next iteration. The
+  // playlist panel shrinks the vis area in non-fullscreen; both threads
+  // refresh the snapshot cache under grid_mu_ so the sizing matches what
+  // document() renders.
   const TermSize ts = term_size();
   const int vis_rows =
-      fullscreen_.load() ? ts.rows : std::max(1, ts.rows - 2);
+      fullscreen_.load() ? ts.rows
+                         : std::max(1, ts.rows - 2 - playlist_panel_rows());
   vis_.set_size(ts.cols, vis_rows);
   {
     std::lock_guard<std::mutex> lk(grid_mu_);
@@ -330,6 +387,50 @@ void FtxuiAppImpl::on_blit(const CellGrid& grid) {
   if (ftxui::App* s = screen_.load()) {
     s->PostEvent(ftxui::Event::Custom);  // wake the loop + force a repaint
   }
+}
+
+ftxui::Element FtxuiAppImpl::render_playlist(int cols) {
+  std::lock_guard<std::mutex> lk(grid_mu_);
+  std::vector<ftxui::Element> lines;
+  if (!playlist_provider_) {
+    return ftxui::emptyElement();
+  }
+  if (!playlist_snap_ || playlist_snap_->titles.empty()) {
+    // Empty playlist: a one-line hint (Go renders no body rows for an empty
+    // list; the header carries the count).
+    lines.push_back(ftxui::text(ui::clip_text("Playlist  (empty)", std::max(cols, 0))));
+    return ftxui::vbox(std::move(lines));
+  }
+  const int n       = static_cast<int>(playlist_snap_->titles.size());
+  const int current = std::clamp(playlist_snap_->current_index, 0, n - 1);
+  // Go TrackWindow: a window of up to kPlaylistRows rows centered on the
+  // current track, clamped to the list (start < 0 → 0; an overrunning end
+  // pulls the window back so it never exceeds the list).
+  int first = 0;
+  if (n > kPlaylistRows) {
+    first = std::clamp(current - (kPlaylistRows - 1) / 2, 0, n - kPlaylistRows);
+  }
+  const int last = std::min(n, first + kPlaylistRows);
+  // Header: "Playlist  pos/total" (Go sepHeaderN, same as the queue header).
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "Playlist  %d/%d", current + 1, n);
+  lines.push_back(
+      ftxui::text(ui::clip_text(buf, std::max(cols, 0))));
+  const int room = std::max(1, cols - 8);  // Go PanelWidth-8 row truncation
+  for (int i = first; i < last; ++i) {
+    std::snprintf(buf, sizeof(buf), "%d. ", i + 1);  // absolute 1-based number
+    std::string label =
+        std::string(buf) + ui::clip_text(playlist_snap_->titles[i], room);
+    if (i == current) {
+      label.insert(0, "▶ ");  // current-track marker (Go: bold + ColorPlaying)
+    }
+    ftxui::Element line = ftxui::text(std::move(label));
+    if (i == current) {
+      line = line | ftxui::bold | ftxui::color(ftxui::Color::Green);
+    }
+    lines.push_back(std::move(line));
+  }
+  return ftxui::vbox(std::move(lines));
 }
 
 ftxui::Element FtxuiAppImpl::document() {
@@ -356,15 +457,25 @@ ftxui::Element FtxuiAppImpl::document() {
     });
   }
   const int vis_cols = dimx;
-  const int vis_rows = fullscreen_.load() ? dimy : std::max(1, dimy - 2);
+  if (fullscreen_.load()) {
+    // V: visualizer alone (Go renderFullVisualizer) — the playlist panel is
+    // hidden along with the status/help lines.
+    ftxui::Element vis = ftxui::canvas(
+        vis_cols * 2, dimy * 4, [this](ftxui::Canvas& c) { draw_grid(c); });
+    return vis;
+  }
+  // Playlist panel under the spectrum (Go stacks renderPlaylist below it);
+  // the vis keeps the majority of the screen height. The panel height is
+  // computed after a revision-keyed snapshot refresh, so an unchanged
+  // playlist costs one atomic load per repaint — no string copies in
+  // document() (the same sizing on_blit uses for set_size).
+  const int vis_rows = std::max(1, dimy - 2 - playlist_panel_rows());
   ftxui::Element vis = ftxui::canvas(
       vis_cols * 2, vis_rows * 4, [this](ftxui::Canvas& c) { draw_grid(c); });
-  if (fullscreen_.load()) {
-    return vis;  // V: visualizer alone
-  }
   const std::string status = status_ ? status_() : std::string();
   return ftxui::vbox({
       vis,
+      render_playlist(dimx),
       ftxui::text(ui::clip_text(status, std::max(dimx, 0))),
       ftxui::dim(ftxui::text(ui::clip_text(kHelpLine, std::max(dimx, 0)))),
   });

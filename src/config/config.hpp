@@ -147,7 +147,7 @@ struct AudiobookshelfConfig {
 // YouTubeMusic.CookiesFrom, SoundCloud.CookiesFrom.
 struct Config {
   // Audio controls
-  double                 volume            = 0.0;    // dB, clamped [VolumeMin, +6]
+  double                 volume            = 0.0;    // dB, clamped [VolumeMin, +24]
   double                 volume_min        = -50.0;  // dB floor [-90, 0]
   bool                   vis_volume_linked = true;
   std::array<double, 10> eq                = {};

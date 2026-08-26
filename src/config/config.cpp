@@ -354,7 +354,7 @@ std::string_view section_name(std::string_view header) {
 
 void Config::clamp() {
   volume_min = std::clamp(volume_min, -90.0, 0.0);
-  volume     = std::clamp(volume, volume_min, 6.0);
+  volume     = std::clamp(volume, volume_min, 24.0);
   if (speed < 0.25 || speed > 2.0) speed = 1.0;
   seek_step_large   = std::clamp(seek_step_large, 6, 600);
   sample_rate       = clamp_sample_rate(sample_rate);

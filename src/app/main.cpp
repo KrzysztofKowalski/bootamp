@@ -246,7 +246,7 @@ public:
     }
   }
 
-  // volume_step nudges the volume by `db`, clamped to [volume_min, +6] like
+  // volume_step nudges the volume by `db`, clamped to [volume_min, +24] like
   // Go's volume stepping.
   void volume_step(double db) {
     const double min = engine_.volume_min();
@@ -254,8 +254,8 @@ public:
     if (next < min) {
       next = min;
     }
-    if (next > 6.0) {
-      next = 6.0;
+    if (next > 24.0) {
+      next = 24.0;
     }
     engine_.set_volume(next);
   }
@@ -552,7 +552,8 @@ std::string status_line(const audio::AudioEngine& engine,
 // cliamp ui/model/keys.go global key table; the shell owns v / V / q / ctrl+c
 // in-process, and the queue/browse/EQ/help screens are driven by app_key.
 void handle_key(std::string_view key, PlaybackController& ctl,
-                const config::Config& cfg, playlist::Playlist& pl) {
+                const config::Config& cfg, playlist::Playlist& pl,
+                provider::radio::Provider& radio_prov) {
   if (key == "space") {
     ctl.toggle_play_pause();
   } else if (key == "left") {
@@ -576,12 +577,32 @@ void handle_key(std::string_view key, PlaybackController& ctl,
   } else if (key == "z" || key == "s") {
     ctl.toggle_shuffle();
   } else if (key == "f") {
-    // Go main-context 'f' (toggleBookmarkFavorite): bookmark the current
-    // track. The radio-favorite toggle lives on the browse screen, where the
-    // provider IDs are known.
+    // Extension over Go: 'f' favorites the current RADIO station, persisted
+    // through the radio provider (the browse screen keeps its own 'f').
+    // Go's main-context 'f' is a local-playlist bookmark
+    // (toggleBookmarkFavorite) that has no persistence in this MVP, so
+    // non-realtime tracks are a logged no-op. Only the radio provider marks
+    // tracks realtime, so Track::realtime discriminates radio stations from
+    // YouTube/local tracks.
     auto [track, idx] = pl.current();
-    if (idx >= 0) {
-      pl.toggle_bookmark(idx);
+    if (idx < 0) {
+      foundation::applog::info("favorite: no current track");
+    } else if (!track.realtime) {
+      foundation::applog::info(
+          "favorite: \"{}\" is not a live radio stream; bookmarks are not "
+          "persisted in this MVP",
+          track.display_name());
+    } else {
+      const std::string name =
+          track.title.empty() ? track.path : track.title;
+      auto result = radio_prov.toggle_favorite_by_url(track.path, track.title);
+      if (!result) {
+        foundation::applog::user_error("favorite: {}", result.error());
+      } else if (*result) {
+        foundation::applog::status("★ {} added to favorites", name);
+      } else {
+        foundation::applog::status("★ {} removed from favorites", name);
+      }
     }
   }
   // Everything else is unhandled for the MVP.
@@ -782,7 +803,7 @@ void app_key(std::string_view key, PlaybackController& ctl,
   //    table). The screen models consumed their own keys in step 1, so these
   //    work unchanged in every mode (Go: screens fall through to the global
   //    table).
-  handle_key(key, ctl, cfg, pl);
+  handle_key(key, ctl, cfg, pl, radio_prov);
 }
 
 // Headless mode: SIGINT (and only SIGINT) ends the wait loop.
@@ -1162,6 +1183,30 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
   std::unique_ptr<ui::FtxuiApp> app =
       ui::make_ftxui_app(vis, std::move(on_key), std::move(status));
   app_impl = dynamic_cast<ui::FtxuiAppImpl*>(app.get());
+
+  // Playlist panel feed: the shell's Vis frame renders the station list (Go
+  // renderPlaylist — visible from startup) from this provider. Revision-keyed:
+  // the shell asks each repaint with the revision it last rendered; an
+  // unchanged playlist answers nullopt (one atomic load) instead of
+  // rebuilding the titles, so the per-frame path copies strings only when
+  // the playlist actually changed (n/p moves the highlight too — index
+  // changes bump the revision).
+  if (app_impl) {
+    app_impl->set_playlist_provider(
+        [&pl](std::uint64_t seen_revision)
+            -> std::optional<ui::FtxuiAppImpl::PlaylistSnapshot> {
+          if (pl.revision() == seen_revision) {
+            return std::nullopt;
+          }
+          ui::FtxuiAppImpl::PlaylistSnapshot snap;
+          snap.revision = pl.revision();
+          snap.current_index = pl.index();
+          for (const playlist::Track& t : pl.tracks()) {
+            snap.titles.push_back(t.display_name());
+          }
+          return snap;
+        });
+  }
 
 #if BOOTAMP_HAS_FTXUI
   if (app_impl) {
