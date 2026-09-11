@@ -140,6 +140,11 @@ public:
 
   std::pair<std::size_t, bool> stream(std::span<Frame> dst) override;
   std::string err() const override;
+  // wait_for_audio_bytes forwards to the pipe's first-PCM wait. Must run
+  // while the stdin pump is alive — the pump feeds ffmpeg, waiting without
+  // it deadlocks (decode_ffmpeg_pipe_stream constructs the streamer first).
+  std::string wait_for_audio_bytes(std::size_t frame_size,
+                                   std::chrono::milliseconds timeout);
   std::size_t len() const override { return pipe_ ? pipe_->total : 0; }
   std::size_t position() const override { return pipe_ ? pipe_->position() : 0; }
   std::string seek(std::size_t) override { return {}; }  // non-seekable (cliamp ffmpegPipeStreamer)

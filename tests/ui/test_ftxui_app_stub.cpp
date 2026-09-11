@@ -37,13 +37,16 @@ TEST_CASE("FtxuiApp interface types are callable", "[ui][ftxui]") {
   FtxuiApp::KeyCallback on_key = [&seen](std::string_view key) {
     seen.assign(key);
   };
-  FtxuiApp::StatusProvider status = [] { return std::string("playing 1:23/4:56"); };
+  // StatusProvider receives the terminal width (cols); the stub ignores it.
+  FtxuiApp::StatusProvider status = [](int /*cols*/) {
+    return std::string("playing 1:23/4:56");
+  };
 
   on_key("space");
   CHECK(seen == "space");
   on_key("shift+left");
   CHECK(seen == "shift+left");
-  CHECK(status() == "playing 1:23/4:56");
+  CHECK(status(80) == "playing 1:23/4:56");
 
   // Default-constructed callbacks are empty (the app tolerates them).
   FtxuiApp::KeyCallback none;

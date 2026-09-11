@@ -364,6 +364,7 @@ void Config::clamp() {
   spotify.bitrate   = clamp_spotify_bitrate(spotify.bitrate);
   padding_h         = std::clamp(padding_h, 0, 10);
   padding_v         = std::clamp(padding_v, 0, 5);
+  if (gieres_base_url.empty()) gieres_base_url = "http://192.168.1.154:13080";
   if (low_power) visualizer = "none";
 }
 
@@ -470,6 +471,9 @@ std::expected<Config, std::string> load() {
   }
   if (auto* v = tbl["visualizer"].node()) {
     if (auto s = str_from_node(*v)) cfg.visualizer = *s;
+  }
+  if (auto* v = tbl["gieres_base_url"].node()) {
+    if (auto s = str_from_node(*v)) cfg.gieres_base_url = *s;
   }
   if (auto* v = tbl["sample_rate"].node()) {
     if (auto i = int_from_node(*v)) cfg.sample_rate = *i;

@@ -12,12 +12,46 @@
 #include <chrono>
 #include <cstddef>
 #include <expected>
+#include <signal.h>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace bootamp::audio {
+
+// SigpipeGuard blocks SIGPIPE for this thread for its lifetime and consumes
+// any pending instance before restoring the mask, so a write to a dead peer
+// (OpenSSL handshake bytes to a RST'd socket, or a pipe whose read end just
+// closed) returns EPIPE instead of raising SIGPIPE — which would kill the
+// whole process silently ("nothing in the app ignores SIGPIPE" is the file
+// invariant: plain socket writes use MSG_NOSIGNAL, OpenSSL and pipe writers
+// arm this guard). consume() uses sigtimedwait with a zero timeout so it
+// never blocks: a pending SIGPIPE was just raised by our own write, but if
+// none is pending we must not sit in sigwait at an unwind point.
+class SigpipeGuard {
+public:
+  SigpipeGuard() {
+    sigset_t block;
+    ::sigemptyset(&block);
+    ::sigaddset(&block, SIGPIPE);
+    armed_ = ::pthread_sigmask(SIG_BLOCK, &block, &old_) == 0;
+  }
+  ~SigpipeGuard() {
+    if (!armed_) return;
+    sigset_t pending;
+    ::sigemptyset(&pending);
+    ::sigaddset(&pending, SIGPIPE);
+    siginfo_t        info {};
+    struct timespec zero {};
+    while (::sigtimedwait(&pending, &info, &zero) >= 0) {}  // never blocks
+    ::pthread_sigmask(SIG_SETMASK, &old_, nullptr);
+  }
+
+private:
+  sigset_t old_ {};
+  bool     armed_ = false;
+};
 
 // HttpResponse is the minimal parsed response. headers are lowercased keys.
 struct HttpResponse {

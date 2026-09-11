@@ -48,6 +48,7 @@
 #include "audio/audio_sink.hpp"
 #include "audio/engine.hpp"
 #include "config/config.hpp"
+#include "config/gieres_overrides.hpp"
 #include "dsp/spectrum.hpp"
 #include "foundation/appdir.hpp"
 #include "foundation/applog.hpp"
@@ -60,11 +61,13 @@
 #include "resolve/resolve.hpp"
 #include "resolve/wrapper.hpp"
 #include "resolve/ytdl.hpp"
+#include "ui/fit.hpp"
 #include "ui/ftxui_app.hpp"
 #include "ui/ftxui_app_impl.hpp"
 #include "ui/screens/browse.hpp"
 #include "ui/screens/device.hpp"
 #include "ui/screens/eq_overlay.hpp"
+#include "ui/screens/gieres.hpp"
 #include "ui/screens/help.hpp"
 #include "ui/screens/info.hpp"
 #include "ui/screens/jump.hpp"
@@ -193,6 +196,7 @@ public:
   // once. The worker runs run_play (all network/spawn work) and clears the
   // flag.
   void play_track(const playlist::Track& t) {
+    cancel_pending_seek();  // an armed scrub belongs to the old track
     enqueue([this, t] { run_play(t); });
   }
 
@@ -302,21 +306,85 @@ public:
     engine_.toggle_pause();
   }
 
+  // Debounced seek state. A URL-track seek rebuilds the whole pipeline
+  // (ffmpeg -ss restart over HTTP Range), so repeated arrow presses must not
+  // spawn a rebuild per press: seek() accumulates the target instantly and
+  // displayed_position_and_duration() reports it so the status clock scrubs
+  // with every press; tick_seek_commit fires ONE engine seek kSeekDebounce
+  // after the last press, on the play worker (a rebuild must never block the
+  // tick thread).
+  static constexpr std::chrono::milliseconds kSeekDebounce{400};
+  mutable std::mutex seek_mu_;
+  double      pending_seek_target_ = 0.0;
+  std::chrono::steady_clock::time_point pending_seek_deadline_{};
+  bool        pending_seek_active_ = false;
+
+  void cancel_pending_seek() {
+    std::lock_guard lk(seek_mu_);
+    pending_seek_active_ = false;
+  }
+
   // seek repositions by `offset_secs` (signed, relative) — Go doSeek:
   // local/HTTP tracks seek directly, yt-dlp seeks by pipeline rebuild. The
-  // yt-dlp debounce window is skipped for the MVP.
+  // offset only ARMS/advances the pending target here; the engine seek fires
+  // once via tick_seek_commit after the user stops pressing.
   void seek(double offset_secs) {
-    const std::string err =
-        engine_.is_ytdl_seek() ? engine_.seek_ytdl(offset_secs)
-                               : engine_.seek(offset_secs);
-    if (!err.empty()) {
-      foundation::applog::user_warn("seek: {}", err);
+    std::lock_guard lk(seek_mu_);
+    if (pending_seek_active_) {
+      pending_seek_target_ += offset_secs;
+    } else {
+      pending_seek_target_ =
+          std::max(engine_.position_secs() + offset_secs, 0.0);
     }
+    pending_seek_deadline_ = std::chrono::steady_clock::now() + kSeekDebounce;
+    pending_seek_active_   = true;
+  }
+
+  // tick_seek_commit fires the debounced seek once the quiet window ends.
+  // Called from the fast tick path (the kTickAnalyze refresher); the commit
+  // itself runs on the play worker.
+  void tick_seek_commit() {
+    double target = 0.0;
+    {
+      std::lock_guard lk(seek_mu_);
+      if (!pending_seek_active_ ||
+          std::chrono::steady_clock::now() < pending_seek_deadline_) {
+        return;  // not armed yet, or the user is still pressing
+      }
+      target               = pending_seek_target_;
+      pending_seek_active_ = false;
+    }
+    // delta stays relative so both engine paths land on the same target
+    // (engine.seek is relative; seek_ytdl adds it to the restart offset).
+    enqueue_play_job([this, target] {
+      const double delta = target - engine_.position_secs();
+      const std::string err =
+          engine_.is_ytdl_seek() ? engine_.seek_ytdl(delta)
+                                 : engine_.seek(delta);
+      if (!err.empty()) {
+        foundation::applog::user_warn("seek: {}", err);
+      }
+    });
+  }
+
+  // displayed_position_and_duration feeds the status clock: while a scrub is
+  // armed the pending target shows immediately (the engine lands there on
+  // commit), otherwise the live engine position.
+  std::pair<double, double> displayed_position_and_duration() const {
+    std::lock_guard lk(seek_mu_);
+    const auto pd = engine_.position_and_duration_secs();
+    if (pending_seek_active_) {
+      return {std::max(pending_seek_target_, 0.0), pd.second};
+    }
+    return pd;
   }
 
   // stop halts playback (Go player.Stop — the 's' key). End-of-playback
   // bookkeeping stays with the watchdog; a stopped engine just idles.
-  void stop() { engine_.stop(); }
+  void stop() {
+    cancel_pending_seek();  // a dead track has no position to scrub
+    engine_.stop();
+  }
 
   // change_speed nudges the playback speed by `delta`, clamped to
   // [0.25, 4.0] (Go changeSpeed — the ]/[ keys; the status line mirrors
@@ -688,7 +756,8 @@ std::string fmt_clock(double secs) {
 std::string status_line(const audio::AudioEngine& engine,
                         const playlist::Playlist& pl,
                         const ui::Visualizer& vis,
-                        bool buffering) {
+                        const PlaybackController& ctl,
+                        const bool buffering, const int cols) {
   std::string out;
   if (buffering) {
     out += "[buffering] ";
@@ -698,31 +767,51 @@ std::string status_line(const audio::AudioEngine& engine,
     out += "[stopped] ";
   }
   auto [track, idx] = pl.current();
+  if (idx < 0) {
+    out += "no tracks";
+  }
+
+  // Must-survive tail (ASCII: byte length == display width) — a long ICY
+  // stream title used to clip vol/speed/vis off the line, so the variable
+  // parts (title + artist, ring message) are capped to the remaining width.
+  std::string tail;
+  if (idx >= 0) {
+    // The clock scrubs instantly: while a debounced seek is armed the
+    // pending target shows (the engine lands there on commit).
+    const auto pd = ctl.displayed_position_and_duration();
+    tail += "  " + fmt_clock(pd.first) + "/" + fmt_clock(pd.second);
+  }
+  tail += std::format("  vol {:.1f} dB", engine.volume());
+  if (engine.speed() != 1.0) {
+    tail += std::format("  {:.2f}x", engine.speed());
+  }
+  tail += "  " + vis.mode_name();
+
+  // On-screen status ring: the newest user-facing message ("play: <err>",
+  // favorites, browse errors). Oldest entries rotate out at max_entries. The
+  // ring yields — at most a third of the free width; the title (+ artist)
+  // gets the rest. ui::clip_text caps each piece width-exactly so the line
+  // never exceeds cols.
+  const auto ring = foundation::applog::ring_entries();
+  const std::string ring_full =
+      ring.empty() ? std::string{} : "  ·  " + ring.back().text;
+  const int free_w = std::max(
+      0, cols - static_cast<int>(out.size()) - static_cast<int>(tail.size()));
+  const int ring_budget = free_w / 3;
+  const std::string ring_capped = ui::clip_text(ring_full, ring_budget);
+  const int title_budget        = std::max(0, free_w - ring_budget);
   if (idx >= 0) {
     std::string title = engine.stream_title();
     if (title.empty()) {
       title = !track.title.empty() ? track.title : track.path;
     }
-    out += title;
     if (!track.artist.empty()) {
-      out += " — " + track.artist;
+      title += " — " + track.artist;
     }
-    const auto pd = engine.position_and_duration_secs();
-    out += "  " + fmt_clock(pd.first) + "/" + fmt_clock(pd.second);
-  } else {
-    out += "no tracks";
+    out += ui::clip_text(title, title_budget);
   }
-  out += std::format("  vol {:.1f} dB", engine.volume());
-  if (engine.speed() != 1.0) {
-    out += std::format("  {:.2f}x", engine.speed());
-  }
-  out += "  " + vis.mode_name();
-  // On-screen status ring: the newest user-facing message ("play: <err>",
-  // favorites, browse errors). Oldest entries rotate out at max_entries.
-  const auto ring = foundation::applog::ring_entries();
-  if (!ring.empty()) {
-    out += "  ·  " + ring.back().text;
-  }
+  out += tail;
+  out += ring_capped;
   return out;
 }
 
@@ -902,6 +991,7 @@ enum class UiMode : std::uint8_t {
   EqOverlay,    // 10-band equalizer (e)
   Help,         // keybinding help (? / h / ctrl+k)
   DevicePicker, // audio device picker (d)
+  Gieres,       // Giereś archive browser (p)
 };
 
 // ScreenRefs bundles the screen models + the active mode so the shell's
@@ -923,6 +1013,9 @@ struct ScreenRefs {
   ui::screens::JumpModel&         jump;
   ui::screens::InfoModel&         info;
   ui::screens::PlPickerModel&     pl_picker;
+  // Full-screen Gieres archive browser (p): Giereś's Radio Radio archive —
+  // live stream, orgonity recordings, echelon timeline (docs/orgonity-api.md).
+  ui::screens::GieresModel&       gieres;
   // Local-provider browse ('L'): local_browse is the second BrowseModel
   // (nullptr when the local provider is unavailable — browse_local is then
   // never set); browse_local selects which model the Browse mode drives.
@@ -952,6 +1045,10 @@ void set_screen(ScreenRefs& s, UiMode next, ui::FtxuiAppImpl* shell) {
     if (s.device.loading()) {
       (void)s.device.load();
     }
+  } else if (next == UiMode::Gieres) {
+    // Entering the archive kicks the pending first fetches (the model is
+    // idempotent — already-fetched views stay put).
+    s.gieres.open();
   }
   // EqOverlay needs no entry work. Leaving a screen is the models' business
   // where they own a close key (queue/help close on esc); app_key detects the
@@ -1129,6 +1226,17 @@ void app_key(std::string_view key, PlaybackController& ctl,
         return;
       }
       break;
+    case UiMode::Gieres:
+      // The archive consumes its own keys and falls through everything else
+      // like the other screens: p toggles it closed, space play/pause, and
+      // volume/skip/repeat/... reach the global table.
+      if (s.gieres.handle_key(key)) {
+        if (!s.gieres.visible()) {
+          set_screen(s, UiMode::Vis, shell);  // esc walked out of the screen
+        }
+        return;
+      }
+      break;
     case UiMode::Vis:
       break;
   }
@@ -1277,6 +1385,11 @@ void app_key(std::string_view key, PlaybackController& ctl,
     // Go keys.go "d": open the audio device picker (close when already
     // open — the picker itself also closes on d/esc/enter via step 1).
     next = s.mode == UiMode::DevicePicker ? UiMode::Vis : UiMode::DevicePicker;
+  } else if (key == "p") {
+    // Giereś's Radio Radio archive browser (bootamp; not a Go key). The
+    // screen model deliberately does not consume p while it is open, so the
+    // same key toggles it closed (DevicePicker-style).
+    next = s.mode == UiMode::Gieres ? UiMode::Vis : UiMode::Gieres;
   } else if (key == "esc") {
     next = UiMode::Vis;
   } else {
@@ -1546,12 +1659,19 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
 
   // 11. Playback controller, tick-context state, resume (cliamp main.go:
   //     448-452 — only when not the default radio and CLI args were given).
+  //     bootamp also keeps the whole state in `resumed` for its own screen
+  //     restore (the panel reopens on every launch — the Gieres archive or
+  //     the radio browse the session left open) and for the auto-play of the
+  //     recorded source in step 13; the seek-back resume itself keeps
+  //     cliamp's guard.
   PlaybackController ctl(engine, pl);
   VisContextState vis_state(static_cast<double>(engine.sample_rate()), engine,
                             cfg_ref.vis_volume_linked);
-  if (!default_radio && !positional.empty()) {
-    auto rs = foundation::resume_load();
-    if (rs && !rs->path.empty() && rs->position_sec > 0) {
+  foundation::ResumeState resumed;  // zero state when the file is absent
+  if (auto rs = foundation::resume_load()) {
+    resumed = *rs;
+    if (!default_radio && !positional.empty() && !rs->path.empty() &&
+        rs->position_sec > 0) {
       ctl.resume = *rs;
     }
   }
@@ -1787,15 +1907,58 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
   pl_picker_actions.on_cancel = [] {};
   pl_picker_model.set_actions(std::move(pl_picker_actions));
 
+  // Giereś archive browser (p): the real client against the configured base
+  // URL; playback wiring mirrors the browse net-search enter/append paths.
+  ui::screens::GieresModel gieres_model =
+      ui::screens::GieresModel::for_host(
+          config::gieres_base_url_for(cfg_ref.gieres_base_url));
+  ui::screens::GieresActions gieres_actions;
+  gieres_actions.on_play_track = [&ctl, &pl](const playlist::Track& t) {
+    // Archive enter: append + play (Go handleNetSearchResultsKey enter
+    // parity) — the play start runs async on the play worker.
+    const int idx = pl.len();
+    pl.add({t});
+    pl.set_index(idx);
+    ctl.play_track(t);
+  };
+  gieres_actions.on_append_track = [&pl](const playlist::Track& t) {
+    pl.add({t});  // archive y: append only, playback keeps running
+  };
+  gieres_actions.on_append_tracks = [&pl](const std::vector<playlist::Track>& ts) {
+    // Echelon day append: the queue chains the 30-minute slices gapless.
+    pl.add(ts);
+  };
+  gieres_model.set_actions(std::move(gieres_actions));
+
   bool browse_local = false;
   ScreenRefs screen_refs{ui_mode,      queue_model, browse_model,
                          eq_model,     help_model,  device_model,
                          url_model,    jump_model,  info_model,
-                         pl_picker_model, local_browse_model.get(),
+                         pl_picker_model, gieres_model,
+                         local_browse_model.get(),
                          browse_local};
 
-  auto status = [&engine, &pl, &vis, &ctl]() {
-    return status_line(engine, pl, vis, ctl.buffering());
+  auto status = [&engine, &pl, &vis, &ctl, &browse_model](int cols) {
+    // Push the on-air snapshot to the browse screen (loop thread — the same
+    // engine reads status_line does; change-gated setter, no per-frame churn
+    // when nothing plays or the text is unchanged). "Station — song": the
+    // radio track's title is the station name, the ICY stream title is the
+    // song.
+    const auto& [st, st_idx] = pl.current();
+    if (st_idx >= 0) {
+      const std::string song = engine.stream_title();
+      const std::string& station = st.title;
+      std::string on_air;
+      if (!song.empty() && song != station) {
+        on_air = !station.empty() ? station + "  —  " + song : song;
+      } else if (!station.empty()) {
+        on_air = station;
+      }
+      browse_model.set_now_playing(on_air);
+    } else {
+      browse_model.set_now_playing({});
+    }
+    return status_line(engine, pl, vis, ctl, ctl.buffering(), cols);
   };
   ui::FtxuiAppImpl* app_impl = nullptr;
   auto on_key = [&ctl, &cfg_ref, &pl, &radio_prov,
@@ -1849,10 +2012,12 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
     auto jump_comp = ui::screens::make_jump_component(jump_model);
     auto info_comp = ui::screens::make_info_component(info_model);
     auto pl_picker_comp = ui::screens::make_pl_picker_component(pl_picker_model);
+    auto gieres_comp = ui::screens::make_gieres_component(gieres_model);
     auto screens_overlay = ftxui::Renderer(
         [&ui_mode, &url_model, &jump_model, &info_model, &pl_picker_model,
-         queue_comp, browse_comp, eq_comp, help_comp, device_comp, url_comp,
-         jump_comp, info_comp, pl_picker_comp]() -> ftxui::Element {
+         &gieres_model, queue_comp, browse_comp, eq_comp, help_comp,
+         device_comp, url_comp, jump_comp, info_comp, pl_picker_comp,
+         gieres_comp]() -> ftxui::Element {
           // Inline overlays (url/jump/info/playlist picker) render above
           // everything while active (Go inline_overlays.go).
           if (url_model.active()) {
@@ -1878,6 +2043,8 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
               return help_comp->Render();
             case UiMode::DevicePicker:
               return device_comp->Render();
+            case UiMode::Gieres:
+              return gieres_comp->Render();
             case UiMode::Vis:
               break;
           }
@@ -1887,23 +2054,82 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
     // Keep the screens' scroll windows sized to the terminal (invoked from
     // document() on the loop thread each repaint, so resizes are live).
     app_impl->set_resize_hook([&queue_model, &browse_model, &help_model,
-                               &device_model](int /*cols*/, int rows) {
+                               &device_model, &gieres_model](int /*cols*/,
+                                                             int rows) {
       const int avail = std::max(rows - 2, 0);  // status + help lines
       queue_model.set_visible_rows(avail);
-      browse_model.set_visible_rows(avail);
+      // Browse keeps the vis strip alive under the station list like gieres:
+      // subtract its chrome (header + key hints + [now-playing] + [search
+      // input + error] + [error/loading] worst case = 7) and the shared vis
+      // strip — without this the frame + canvas overflowed the terminal and
+      // the list bottom/footer/viz were pushed off-screen.
+      browse_model.set_visible_rows(
+          std::max(avail - 7 - ui::FtxuiApp::screen_vis_rows(rows), 0));
       help_model.set_visible_rows(avail);
       device_model.set_visible_rows(avail);
+      // Gieres keeps the visualizer alive below the archive on tall
+      // terminals: hand the vis its reserved rows (screen_vis_rows, the
+      // same policy document()/on_blit render with) plus the screen's own
+      // chrome (header + separators + footer ≈ 4), so the frame fits
+      // exactly instead of overflowing by the chrome rows.
+      gieres_model.set_visible_rows(std::max(
+          avail - 4 - ui::FtxuiApp::screen_vis_rows(rows), 0));
     });
   }
 #endif  // BOOTAMP_HAS_FTXUI
 
+  // 12b. Reopen the panel the last session left open (bootamp resume): the
+  //      Gieres archive (p) with its tab, or the radio browse (R). set_screen
+  //      performs the per-screen entry work (the first fetches / the provider
+  //      refresh) exactly like the key that opens the screen, and flips the
+  //      shell's screen-visible flag so the frame opens on the panel. The
+  //      Gieres tab is set first: open() kicks the fetch for the current view
+  //      state. Nothing plays from the panel here — the source restarts in
+  //      step 13 when the state carried one.
+  if (resumed.screen == "gieres") {
+    if (resumed.screen_tab == "orgonity") {
+      gieres_model.set_view(ui::screens::GieresModel::View::Orgonity);
+    } else if (resumed.screen_tab == "echelon") {
+      gieres_model.set_view(ui::screens::GieresModel::View::Echelon);
+    } else {
+      gieres_model.set_view(ui::screens::GieresModel::View::Live);
+    }
+    set_screen(screen_refs, UiMode::Gieres, app_impl);
+  } else if (resumed.screen == "radio") {
+    set_screen(screen_refs, UiMode::Browse, app_impl);
+  }
+
   // 13. Start playback (cliamp ui/model/init.go autoPlayMsg). The TUI starts
   //     when cfg.auto_play is set; the MVP additionally starts immediately
   //     when CLI args were given (the plan's `bootamp play <file>` examples)
-  //     and always in headless mode.
+  //     and always in headless mode. bootamp resume: the recorded source
+  //     (the last session's live stream or track) restarts first when no CLI
+  //     args supersede it — explicit args always win — through the same
+  //     play_track path the screen enter actions use, with the recorded
+  //     position applied by run_play (position 0 skips the seek: that is a
+  //     live stream, it restarts live).
+  const bool resume_play = positional.empty() && !resumed.path.empty();
+  if (resume_play && resumed.position_sec > 0) {
+    ctl.resume = resumed;  // run_play seeks to it after the track starts
+  }
   const bool play_now =
       pl.len() > 0 && (cfg_ref.auto_play || !positional.empty() || !app);
-  if (play_now) {
+  if (resume_play) {
+    // Rebuild the source and play it like the screen enter paths (append +
+    // set_index + play): the playlist panel and next/prev track it, and the
+    // shutdown save reads it back from pl.current(). A zero position marks a
+    // live stream (non-live tracks reach the file only once a position
+    // exists) — the realtime radio pipeline owns it, as for the Gieres Live
+    // / browse-station plays.
+    playlist::Track resumed_track = playlist::track_from_path(resumed.path);
+    if (resumed.position_sec == 0) {
+      resumed_track.realtime = true;
+    }
+    const int resumed_idx = pl.len();
+    pl.add({resumed_track});
+    pl.set_index(resumed_idx);
+    ctl.play_track(resumed_track);
+  } else if (play_now) {
     auto [track, idx] = pl.current();
     if (idx >= 0) {
       ctl.play_track(track);
@@ -1930,8 +2156,11 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
     app_impl->set_tick_context(std::move(ctx));
     ctx_refresher =
         std::jthread([app_impl, &engine, &vis_state,
-                      &cfg_ref](std::stop_token stoken) {
+                      &cfg_ref, &ctl](std::stop_token stoken) {
           while (!stoken.stop_requested()) {
+            // Fire a debounced seek whose quiet window ended (runs on the
+            // play worker inside; the tick thread only checks the deadline).
+            ctl.tick_seek_commit();
             ui::VisTickContext ctx =
                 build_tick_context(engine, vis_state,
                                    cfg_ref.vis_volume_linked);
@@ -1960,8 +2189,10 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
     }
   }
 
-  // 17. Clean shutdown: stop the UI threads, then the engine, then save the
-  //     resume state (cliamp: on exit, fm.ResumeState -> resume.Save).
+  // 17. Clean shutdown: stop the UI threads, capture + save the resume
+  //     state, then the engine (the state is captured before engine.stop()
+  //     — stop() zeroes the position; the file is written after, cliamp:
+  //     on exit, fm.ResumeState -> resume.Save).
   ctx_refresher.request_stop();
   if (ctx_refresher.joinable()) {
     ctx_refresher.join();
@@ -1974,16 +2205,76 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
   // dropped; an in-flight play start runs to completion first (bounded by
   // the pipeline timeouts: 30s connect/TLS, 15s ffmpeg initial-audio wait).
   ctl.stop_play_worker();
-  engine.stop();
-  if (!default_radio) {
-    auto [track, idx] = pl.current();
-    if (idx >= 0 && !track.is_live()) {
+  // Capture the resume state BEFORE the engine stops: stop() tears the
+  // current pipeline down and zeroes the position, so a post-stop read would
+  // always be 0 and the file would never carry one (cliamp captures its
+  // exitResume in the quit path, before player.Close(); the save itself
+  // still happens after the player is closed, below). The watchdog and the
+  // play worker are joined by now, so pl.current() IS the track the engine
+  // plays (a screen-enter track included — the Gieres live stream and the
+  // browse stations are appended to the playlist before play), and the
+  // buffering window is settled.
+  //
+  // The open panel (bootamp-only state): the Gieres archive (p) with its
+  // active tab, or the radio browse (R / b) — the main vis frame records "".
+  // (The local-provider browse 'L' drives the same Browse mode and records
+  // as "radio" too.)
+  std::string screen;      // "" | "gieres" | "radio"
+  std::string screen_tab;  // gieres tab: "live" | "orgonity" | "echelon"
+  if (ui_mode == UiMode::Gieres && gieres_model.visible()) {
+    screen = "gieres";
+    switch (gieres_model.view()) {
+      case ui::screens::GieresModel::View::Live:
+        screen_tab = "live";
+        break;
+      case ui::screens::GieresModel::View::Orgonity:
+        screen_tab = "orgonity";
+        break;
+      case ui::screens::GieresModel::View::Echelon:
+        screen_tab = "echelon";
+        break;
+    }
+  } else if (ui_mode == UiMode::Browse) {
+    screen = "radio";
+  }
+
+  // The on-air source: is_playing() is still honest here (engine.stop() has
+  // not run) and covers paused playback; pl.current() is the playing track
+  // (every play start points the playlist at its track). Live streams get a
+  // zero position — the resumed panel restarts the stream from now, where
+  // cliamp skipped them entirely; a stopped/failed source leaves only the
+  // panel, when one is open.
+  foundation::ResumeState saved;  // default = nothing on the air, no panel
+  auto [track, idx] = pl.current();
+  if (engine.is_playing() && idx >= 0) {
+    if (track.is_live()) {
+      saved = foundation::ResumeState{track.path, 0, cfg_ref.playlist, screen,
+                                      screen_tab};
+    } else {
       const auto pd = engine.position_and_duration_secs();
       if (pd.first > 0) {
-        (void)foundation::resume_save(foundation::ResumeState{
-            track.path, static_cast<int>(pd.first), cfg_ref.playlist});
+        saved = foundation::ResumeState{track.path,
+                                        static_cast<int>(pd.first),
+                                        cfg_ref.playlist, screen, screen_tab};
+      } else if (!screen.empty()) {
+        saved = foundation::ResumeState{
+            "", 0, "", screen, screen_tab};  // started seconds ago: panel only
       }
     }
+  } else if (!screen.empty()) {
+    // Nothing on the air, but a panel is open: reopen it on the next launch.
+    saved = foundation::ResumeState{"", 0, "", screen, screen_tab};
+  }
+
+  engine.stop();
+  // cliamp leaves the built-in default-radio list out of the resume file
+  // (its stations are not resume material — the list is always there and
+  // live streams carry no position): on a default-radio launch only the
+  // open panel persists (with the source it was playing); a bare session
+  // over the built-in list leaves the file untouched, as before.
+  if (default_radio ? !saved.screen.empty()
+                    : (!saved.path.empty() || !saved.screen.empty())) {
+    (void)foundation::resume_save(saved);
   }
   foundation::applog::info("bootamp stopped");
   close_log();

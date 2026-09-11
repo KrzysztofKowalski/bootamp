@@ -754,9 +754,17 @@ std::shared_ptr<ftxui::ComponentBase> make_browse_component(BrowseModel& model) 
     if (model.net_results_active()) {
       // Net-search results screen (Go renderNetSearchBody): the results list
       // replaces the provider list body, windowed by net_scroll/net_cursor.
+      // The window bounds the MENU rows to the terminal (the host budgets
+      // visible_rows for this screen's chrome + the vis strip under it, the
+      // gieres-shared policy): pushing the whole tail overflowed the frame
+      // and pushed the footer + the vis canvas off-screen.
       const int width = 80;
       const int nr = static_cast<int>(model.net_results().size());
-      for (int i = model.net_scroll(); i < nr; ++i) {
+      const int end =
+          model.visible_rows() > 0
+              ? std::min(nr, model.net_scroll() + model.visible_rows())
+              : nr;
+      for (int i = model.net_scroll(); i < end; ++i) {
         entries->push_back(model.net_row_label(i, width));
       }
       *selected = std::max(0, model.net_cursor() - model.net_scroll());
@@ -767,10 +775,16 @@ std::shared_ptr<ftxui::ComponentBase> make_browse_component(BrowseModel& model) 
       // entries too, so the cursor row's Menu index is its model index minus
       // scroll plus the headers emitted in between. Track it while building
       // the entries so the Menu's selected (focus/scroll placement, and the
-      // active-row styling above) follows the model cursor exactly.
+      // active-row styling above) follows the model cursor exactly. The
+      // window bounds the entries to the host-budgeted visible rows (same
+      // overflow rationale as the net branch above).
       int menu_index  = 0;  // index of the next entry pushed
       int cursor_menu = 0;  // menu index of the model cursor row
-      for (int i = model.scroll(); i < n; ++i) {
+      const int end =
+          model.visible_rows() > 0
+              ? std::min(n, model.scroll() + model.visible_rows())
+              : n;
+      for (int i = model.scroll(); i < end; ++i) {
         const std::string sec = model.section_label(i);
         if (!sec.empty() && sec != last_section) {
           entries->push_back("── " + sec + " ──");
@@ -789,6 +803,16 @@ std::shared_ptr<ftxui::ComponentBase> make_browse_component(BrowseModel& model) 
         ftxui::text(model.net_results_active() ? model.net_header_label()
                                                : model.header_label()),
     };
+    // Key hints + what's on air (dim, under the header — the gieres header
+    // pattern): the user could not see the list's keys, the playing station
+    // and the song on this screen. Net results have their own key set.
+    lines.push_back(ftxui::dim(ftxui::text(model.net_results_active()
+        ? "  ↑↓/k/j select  enter play  a queue  / new search  esc back"
+        : "  ↑↓/k/j select  pgup/pgdn page  enter play  f favorite  "
+          "/ search  ctrl+f youtube  r refresh  esc back")));
+    if (!model.now_playing().empty()) {
+      lines.push_back(ftxui::dim(ftxui::text("  " + model.now_playing())));
+    }
     if (model.search_active()) {
       lines.push_back(search_input->Render());
       if (!model.search_error().empty()) {

@@ -19,13 +19,3 @@ golden/*.tmp
 .DS_Store
 *.swp
 *~
-
-# build log
-build.log
-
-# private / excluded files not part of the public tree
-NOTES.md
-PORT.md
-cliamp/
-tee
-official/

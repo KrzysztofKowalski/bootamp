@@ -294,7 +294,7 @@ bootamp_test(test_playlist  "${TEST_PLAYLIST_SRCS}"   "bootamp_playlist")
 bootamp_test(test_resolve    "${TEST_RESOLVE_SRCS}"    "bootamp_resolve;bootamp_audio")
 bootamp_test(test_provider   "${TEST_PROVIDER_SRCS}"   "bootamp_provider")
 bootamp_test(test_config     "${TEST_CONFIG_SRCS}"     "bootamp_config")
-bootamp_test(test_ui         "${TEST_UI_SRCS}"         "bootamp_ui")
+bootamp_test(test_ui         "${TEST_UI_SRCS}"         "bootamp_ui;bootamp_config")
 
 # --- Benchmark (google-benchmark) -------------------------------------------
 find_package(benchmark QUIET)

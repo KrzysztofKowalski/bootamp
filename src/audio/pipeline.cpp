@@ -407,9 +407,30 @@ PipelineBuilder::build_pipeline(const std::string& path, std::function<void(std:
     return prefetch_network_pipeline(std::move(tp), src->prefetch);
   }
 
+  // Finite ranged URL (Gieres recordings, podcasts): ffmpeg opens the URL
+  // itself — that buys seek-by-restart (input-side -ss over HTTP Range),
+  // which neither the stdin chain (FfmpegPipeStreamer::seek is a no-op) nor
+  // the native chain decoders can do. Live/unknown-length streams keep the
+  // chain paths below (ICY StreamTitle + the stdin pump; no seek on live).
+  if (is_url(path) && !src->live && src->contentLength >= 0) {
+    src->chain->close();
+    src->chain.reset();
+    auto d = decode_ffmpeg_local(path, sr_, bit_depth_);
+    if (!d) return std::unexpected("decode: " + d.error());
+    auto tp = std::make_unique<TrackPipeline>();
+    tp->decoder  = std::move(*d);
+    tp->stream   = tp->decoder;
+    tp->format   = pipe_format(sr_, bit_depth_);
+    tp->seekable = true;
+    tp->path     = path;
+    return tp;
+  }
+
   // URL needs-ffmpeg (AAC/AAC+/Opus/...): stdin-fed ffmpeg pipe from the
   // existing reader chain so ICY StreamTitle parsing keeps working for
-  // ffmpeg-only codecs.
+  // ffmpeg-only codecs. Finite ranged URLs never reach this branch (they
+  // take the seekable ffmpeg-direct path above); what lands here is live
+  // radio or a stream with unknown length.
   if (is_url(path) && needs_ffmpeg(ext)) {
     auto d = decode_ffmpeg_pipe_stream(std::move(src->chain), sr_, bit_depth_, src->live);
     if (!d) return std::unexpected("decode: " + d.error());

@@ -24,7 +24,10 @@ namespace bootamp::ui {
 class FtxuiApp {
 public:
   using KeyCallback  = std::function<void(std::string_view key)>;
-  using StatusProvider = std::function<std::string()>;
+  // The status provider receives the current terminal width so the line can
+  // keep its fixed tail (vol dB / speed / vis mode / ring) inside `cols` —
+  // without it, a long ICY stream title clips the volume off the screen.
+  using StatusProvider = std::function<std::string(int cols)>;
 
   virtual ~FtxuiApp() = default;
 
@@ -33,6 +36,14 @@ public:
   virtual void run() = 0;
   // quit requests the loop exit (callable from any key handler).
   virtual void quit() = 0;
+
+  // screen_vis_rows: how many terminal rows the visualizer keeps under an
+  // open screen (the gieres archive renders the spectrum below its list when
+  // the terminal is tall enough; short terminals keep the old full-frame
+  // screen swap). The screen's own chrome and a usable list window must fit
+  // before the vis gets room. Shared by document(), the blit sizing and the
+  // host's row-budget hook so all three agree on the split.
+  static int screen_vis_rows(int term_rows);
 };
 
 // make_ftxui_app constructs the FTXUI shell. Returns nullptr if FTXUI is not

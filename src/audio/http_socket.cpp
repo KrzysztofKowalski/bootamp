@@ -276,36 +276,9 @@ std::expected<int, std::string> dial(const detail::ParsedUrl& u,
 // MSG_NOSIGNAL, and nothing in the app ignores SIGPIPE (Go parity: crypto/tls
 // surfaces EPIPE/ECONNRESET as errors instead of dying).
 
-// SigpipeGuard blocks SIGPIPE for this thread for its lifetime and consumes
-// any pending instance before restoring the mask, so an OpenSSL call writing
-// to a RST'd peer returns EPIPE instead of raising SIGPIPE (which would kill
-// the whole process — the plain-socket path uses MSG_NOSIGNAL for the same
-// reason). consume() uses sigtimedwait with a zero timeout so it never
-// blocks: a pending SIGPIPE was just raised by our own OpenSSL call, but if
-// none is pending we must not sit in sigwait at an unwind point.
-class SigpipeGuard {
-public:
-  SigpipeGuard() {
-    sigset_t block;
-    ::sigemptyset(&block);
-    ::sigaddset(&block, SIGPIPE);
-    armed_ = ::pthread_sigmask(SIG_BLOCK, &block, &old_) == 0;
-  }
-  ~SigpipeGuard() {
-    if (!armed_) return;
-    sigset_t pending;
-    ::sigemptyset(&pending);
-    ::sigaddset(&pending, SIGPIPE);
-    siginfo_t        info {};
-    struct timespec zero {};
-    while (::sigtimedwait(&pending, &info, &zero) >= 0) {}  // never blocks
-    ::pthread_sigmask(SIG_SETMASK, &old_, nullptr);
-  }
-
-private:
-  sigset_t old_ {};
-  bool     armed_ = false;
-};
+// SigpipeGuard lives in http_socket.hpp (shared with decode.cpp's ffmpeg
+// stdin pump — same failure mode: a write to a closed pipe/socket would
+// otherwise raise SIGPIPE and kill the process).
 
 std::string ssl_error_string() {
   char buf[256];

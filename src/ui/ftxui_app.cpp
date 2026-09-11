@@ -219,7 +219,8 @@ std::string canonical_key_name(bool is_character, std::string_view input) {
 inline constexpr std::string_view kHelpLine =
     "space play/pause  ←/→ seek  shift+←/→ ±30s  "
     "+/- volume  ↑/↓ cursor  s stop  z shuffle  "
-    "n next  < prev  v vis  V fullscreen  e EQ  l queue  R/b browse  ? help  q quit";
+    "n next  < prev  v vis  V fullscreen  e EQ  l queue  R/b browse  "
+    "p gieres  ? help  q quit";
 
 #if BOOTAMP_HAS_FTXUI
 
@@ -391,6 +392,14 @@ FtxuiAppImpl::FtxuiAppImpl(Visualizer& vis, FtxuiApp::KeyCallback on_key,
 
 FtxuiAppImpl::~FtxuiAppImpl() = default;
 
+int FtxuiApp::screen_vis_rows(const int term_rows) {
+  // The vis strip under an open screen: screen chrome (header + separators +
+  // footer ≈ 4) + status + help (2) + a usable list window (4) must fit
+  // before the vis gets room; short terminals keep the full-frame screen.
+  constexpr int kScreenVisRows = 10;
+  return term_rows - 2 - 4 - kScreenVisRows >= 4 ? kScreenVisRows : 0;
+}
+
 void FtxuiAppImpl::set_tick_context(VisTickContext ctx) {
   {
     // Cache a copy for on_blit's post floor: the driver cadence
@@ -488,9 +497,12 @@ void FtxuiAppImpl::run() {
   // both the spectrum and the panel.
   const TermSize ts = term_size();
   if (ts.cols > 0) {
+    const bool screen_open = overlay_ && screen_visible_.load();
     const int vis_rows =
-        fullscreen_.load() ? ts.rows
-                           : std::max(1, ts.rows - 2 - playlist_panel_rows());
+        fullscreen_.load()
+            ? ts.rows
+            : (screen_open ? std::max(1, FtxuiApp::screen_vis_rows(ts.rows))
+                           : std::max(1, ts.rows - 2 - playlist_panel_rows()));
     vis_.set_size(ts.cols, vis_rows);
   }
   ticks_->start();
@@ -613,13 +625,17 @@ bool FtxuiAppImpl::handle_key_name(const std::string& name) {
 void FtxuiAppImpl::on_blit(const CellGrid& grid) {
   // Size the vis to the terminal on the tick thread (set_size must not race
   // tick()/render()); the loop picks up the new size next iteration. The
-  // playlist panel shrinks the vis area in non-fullscreen; both threads
+  // playlist panel shrinks the vis area in non-fullscreen; an open screen
+  // keeps its reserved vis strip (the gieres spectrum) instead; both threads
   // refresh the snapshot cache under grid_mu_ so the sizing matches what
   // document() renders.
   const TermSize ts = term_size();
+  const bool screen_open = overlay_ && screen_visible_.load();
   const int vis_rows =
-      fullscreen_.load() ? ts.rows
-                         : std::max(1, ts.rows - 2 - playlist_panel_rows());
+      fullscreen_.load()
+          ? ts.rows
+          : (screen_open ? std::max(1, FtxuiApp::screen_vis_rows(ts.rows))
+                         : std::max(1, ts.rows - 2 - playlist_panel_rows()));
   vis_.set_size(ts.cols, vis_rows);
 
   if (!focused_.load()) {
@@ -732,9 +748,21 @@ ftxui::Element FtxuiAppImpl::document() {
   }
   const ftxui::Element help = help_line(dimx);
   if (overlay_ && screen_visible_.load()) {
-    // A screen (queue/browse/EQ/help) is open: full-frame swap — the screens
-    // composite renders the active screen above the status + help lines. The
-    // vis canvas is not drawn (it keeps ticking in the background).
+    // A screen (queue/browse/EQ/help) is open. On a tall enough terminal the
+    // vis keeps its reserved strip under the screen (the gieres archive
+    // renders the spectrum below the archive list — screen_vis_rows is the
+    // shared policy the host's row-budget hook subtracts for the screens
+    // that want it); otherwise the old full-frame swap. The vis keeps
+    // ticking in the background either way.
+    const int sv = FtxuiApp::screen_vis_rows(dimy);
+    if (sv > 0) {
+      return ftxui::vbox({
+          overlay_->Render(),
+          vis_canvas(dimx, sv),
+          status_element(dimx),
+          help,
+      });
+    }
     return ftxui::vbox({
         overlay_->Render(),
         status_element(dimx),
@@ -791,8 +819,10 @@ ftxui::Element FtxuiAppImpl::help_line(int cols) {
 
 ftxui::Element FtxuiAppImpl::status_element(int cols) {
   // Rebuilt only when the provider output (or the clip width) changed — the
-  // provider is still polled per repaint so changes are detected.
-  const std::string status = status_ ? status_() : std::string();
+  // provider is still polled per repaint so changes are detected. The provider
+  // gets `cols` so IT does the fitting (title/ring yield to the fixed tail);
+  // the clip_text here is just a last-resort guard.
+  const std::string status = status_ ? status_(cols) : std::string();
   if (status != last_status_ || cols != last_status_cols_) {
     last_status_ = status;
     last_status_cols_ = cols;

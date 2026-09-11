@@ -14,6 +14,7 @@
 
 #include "audio/ffmpeg_pipe.hpp"
 #include "audio/format.hpp"
+#include "audio/http_socket.hpp"
 #include "audio/icy.hpp"
 #include "audio/streamer.hpp"
 #include "audio/stream_seek_closer.hpp"
@@ -857,8 +858,8 @@ std::size_t probe_frames(std::string_view path, int sr) {
 FfmpegPipeStreamer::FfmpegPipeStreamer(std::unique_ptr<FfmpegPipe> pipe,
                                        std::unique_ptr<IcyByteSource> src, bool live,
                                        int stdin_write_fd)
-  : pipe_(std::move(pipe)), src_(std::move(src)), live_(live),
-    stdin_write_fd_(stdin_write_fd) {
+  : pipe_(std::move(pipe)), src_(std::move(src)), stdin_write_fd_(stdin_write_fd),
+    live_(live) {
   if (src_) pump_ = std::jthread([this](std::stop_token stoken) { pump_loop(stoken); });
 }
 
@@ -871,6 +872,15 @@ std::pair<std::size_t, bool> FfmpegPipeStreamer::stream(std::span<Frame> dst) {
 
 std::string FfmpegPipeStreamer::err() const {
   return pipe_ ? pipe_->err() : std::string{};
+}
+
+std::string FfmpegPipeStreamer::wait_for_audio_bytes(
+    std::size_t frame_size, std::chrono::milliseconds timeout) {
+  // Must run while the stdin pump is alive — the pump is what feeds ffmpeg,
+  // and waiting without it deadlocks (decode_ffmpeg_pipe_stream constructs
+  // the streamer first for exactly that reason).
+  return pipe_ ? pipe_->wait_for_audio_bytes(frame_size, timeout)
+               : std::string{};
 }
 
 void FfmpegPipeStreamer::known_duration_hint(std::chrono::duration<double> d) {
@@ -905,6 +915,14 @@ void FfmpegPipeStreamer::pump_loop(std::stop_token stoken) {
   // it until interrupt()). We close our end on chain EOF so ffmpeg sees stdin
   // EOF, and on stop/EPIPE so close() can join us without an fd-reuse race.
   if (stdin_write_fd_ < 0) return;
+  // A pipe write with no readers raises SIGPIPE, and nothing in the app
+  // ignores the signal (http_socket.cpp invariant): interrupt()/close() can
+  // close ffmpeg's stdin read end at any moment while this write is blocked
+  // (every stream switch runs install_current → old->interrupt()), which
+  // would kill the whole process silently. Block SIGPIPE for this thread's
+  // lifetime; the write then returns EPIPE and the loop exits via its error
+  // path. Same pattern as OpenSSL's SigpipeGuard in http_socket.cpp.
+  const SigpipeGuard sigpipe_guard;
   std::vector<std::byte> buf(64 * 1024);
   while (!stoken.stop_requested()) {
     auto [n, ok] = src_->read(buf);
@@ -1049,15 +1067,21 @@ decode_ffmpeg_pipe_stream(std::unique_ptr<IcyByteSource> src, int sr, int bit_de
     src->close();
     return std::unexpected(p.error());
   }
-  std::string wait = (*p)->wait_for_audio_bytes(pcm_frame_size((*p)->f32), kFfmpegPipeTimeout);
+  // The pump (started by the FfmpegPipeStreamer constructor below) is the
+  // only stdin feeder: ffmpeg blocks on its empty stdin until the pump runs,
+  // so the first-PCM wait MUST come after construction — waiting first
+  // deadlocks (ffmpeg waits for stdin, the wait waits for PCM) and burns
+  // kFfmpegPipeTimeout ("timed out waiting for audio data"). The frame size
+  // is captured before *p moves into the streamer.
+  const std::size_t frame = pcm_frame_size((*p)->f32);
+  auto streamer = std::unique_ptr<FfmpegPipeStreamer>(
+      new FfmpegPipeStreamer(std::move(*p), std::move(src), live, fds[1]));
+  std::string wait = streamer->wait_for_audio_bytes(frame, kFfmpegPipeTimeout);
   if (!wait.empty()) {
-    (*p)->stop();
-    ::close(fds[1]);
-    src->close();
+    streamer->close();  // interrupt + src close + pump join + pipe stop
     return std::unexpected(std::move(wait));
   }
-  return std::unique_ptr<FfmpegPipeStreamer>(
-      new FfmpegPipeStreamer(std::move(*p), std::move(src), live, fds[1]));
+  return streamer;
 }
 
 // ---- decode_with_ext --------------------------------------------------------

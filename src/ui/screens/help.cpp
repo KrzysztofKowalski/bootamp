@@ -58,9 +58,10 @@ void clamp_scroll(int& cursor, int& scroll, int count, int visible) {
 // deduped by key+action like Go buildKeymapEntries. bootamp's queue-screen
 // keys (s shuffle, r repeat, f favorite, d remove, c clear, enter play) are
 // screen-local and listed in queue.hpp. Out-of-MVP rows are dropped (the
-// non-radio providers S/P/C/M/J/E/B/Q/T, provider browser N, o/p/y/t,
+// non-radio providers S/P/C/M/J/E/B/Q/T, provider browser N, o/y/t,
 // Ctrl+V/S/X, Tab) and labels reflect bootamp's behavior (Y = YouTube
-// search, Esc = close screen, Up Down = scroll/EQ adjust).
+// search, Esc = close screen, Up Down = scroll/EQ adjust; p is bootamp's
+// Giereś archive browser, docs/orgonity-api.md).
 std::vector<HelpEntry> build_entries() {
   std::vector<HelpEntry> out;
   const auto add = [&out](std::string key, std::string action) {
@@ -100,7 +101,7 @@ std::vector<HelpEntry> build_entries() {
   add("w", "Write track to playlist");
   add("L", "Browse local playlists");
   add("R", "Open radio provider");
-  add("Y", "Open YouTube search");
+  add("p", "Open Giereś archive (Radio Radio: live/orgonity/echelon)");
   add("Ctrl+J", "Jump to time");
   add("Ctrl+H", "Toggle album headers");
   add("i", "Track info");

@@ -121,6 +121,10 @@ public:
   int  cursor() const { return cursor_; }
   int  scroll() const { return scroll_; }
   void set_visible_rows(int rows);
+  // visible_rows — the host-budgeted list window (0 = unbounded); the FTXUI
+  // renderer bounds the pushed menu entries with it so the frame + the vis
+  // strip under the screen fit the terminal (the gieres-shared policy).
+  int  visible_rows() const { return visible_rows_; }
 
   void cursor_up();    // Go providerMoveUp (wraps to last)
   void cursor_down();  // Go providerMoveDown (wraps to first) + maybe_load_more
@@ -166,6 +170,16 @@ public:
   void set_search_query(std::string_view q);  // typed text (no submit)
   bool search_loading() const { return search_loading_; }
   const std::string& search_error() const { return search_error_; }
+  // now_playing — the playing station + song the host pushes (loop thread,
+  // change-gated setter): rendered as a dim line under the browse header so
+  // the current radio and the on-air track stay visible on the list screen
+  // (the gieres Live "(now: …)" pattern; the model never queries the engine).
+  void set_now_playing(std::string_view s) {
+    if (now_playing_ != s) {
+      now_playing_ = std::string{s};
+    }
+  }
+  const std::string& now_playing() const { return now_playing_; }
   // search_results_kept — true after a successful catalog search submit
   // (enter): the prompt closed but the provider keeps returning the search
   // results, so the host must NOT clear the provider-side search (Go
@@ -232,6 +246,7 @@ private:
 
   std::vector<playlist::PlaylistInfo> lists_;
   std::string                         error_;
+  std::string                         now_playing_;
   bool                                has_sections_ = false;
 
   int cursor_       = 0;

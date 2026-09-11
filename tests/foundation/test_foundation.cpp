@@ -3,8 +3,9 @@
 // Covers the cliamp `internal/{appdir,fileutil,resume,fuzzy,tomlutil}` ports:
 //   - write_file_atomic roundtrip + stricter-mode preservation
 //   - copy_file (roundtrip, missing source, overwrite, empty file)
-//   - resume save/load (roundtrip, empty-path no-op, non-positive no-op,
-//     missing-file zero, corrupt-file zero, parent creation, overwrite)
+//   - resume save/load (roundtrip, empty-path no-op, zero-position live
+//     stream, negative no-op, missing-file zero, corrupt-file zero, parent
+//     creation, overwrite, screen/screen_tab roundtrip + pre-screen file)
 //   - fuzzy.Match (match cases + ranking order)
 //   - tomlutil (unquote, parse_sections, parse_named_sections)
 //
@@ -348,16 +349,35 @@ TEST_CASE("resume save ignores empty path", "[foundation][resume]") {
   REQUIRE_FALSE(fs::exists(tmp.path() / ".config" / "bootamp" / "resume.json"));
 }
 
-TEST_CASE("resume save ignores non-positive position", "[foundation][resume]") {
+TEST_CASE("resume save persists a zero position (live stream)",
+          "[foundation][resume]") {
+  TempRoot tmp;
+  auto g = env_isolate_appdir(tmp.path());
+
+  // bootamp: a source with no position is what a live-stream session leaves
+  // (cliamp skipped it — the position is meaningless on a stream, the source
+  // is not).
+  bootamp::foundation::ResumeState s;
+  s.path = "https://c16.radioboss.fm:18014/stream";
+  s.position_sec = 0;
+  s.playlist = "p";
+  REQUIRE(bootamp::foundation::resume_save(s).has_value());
+
+  auto loaded = bootamp::foundation::resume_load();
+  REQUIRE(loaded.has_value());
+  REQUIRE(loaded->path == "https://c16.radioboss.fm:18014/stream");
+  REQUIRE(loaded->position_sec == 0);
+  REQUIRE(loaded->playlist == "p");
+}
+
+TEST_CASE("resume save ignores a negative position", "[foundation][resume]") {
   TempRoot tmp;
   auto g = env_isolate_appdir(tmp.path());
 
   bootamp::foundation::ResumeState s;
   s.path = "/music/song.mp3";
-  s.position_sec = 0;
-  s.playlist = "p";
-  REQUIRE(bootamp::foundation::resume_save(s).has_value());
   s.position_sec = -5;
+  s.playlist = "p";
   REQUIRE(bootamp::foundation::resume_save(s).has_value());
 
   REQUIRE_FALSE(fs::exists(tmp.path() / ".config" / "bootamp" / "resume.json"));
@@ -442,7 +462,69 @@ TEST_CASE("resume save omits playlist when empty", "[foundation][resume]") {
   REQUIRE(raw.has_value());
   // omitempty: no "playlist" key in the serialized JSON.
   REQUIRE(raw->find("\"playlist\"") == std::string::npos);
+  // No panel recorded: the screen fields are absent too.
+  REQUIRE(raw->find("\"screen\"") == std::string::npos);
+  REQUIRE(raw->find("\"screen_tab\"") == std::string::npos);
   REQUIRE_FALSE(raw->empty());
+}
+
+TEST_CASE("resume screen/screen_tab roundtrip", "[foundation][resume]") {
+  TempRoot tmp;
+  auto g = env_isolate_appdir(tmp.path());
+
+  bootamp::foundation::ResumeState s;
+  s.path = "https://c16.radioboss.fm:18014/stream";
+  s.position_sec = 0;  // live stream
+  s.playlist = "";
+  s.screen = "gieres";
+  s.screen_tab = "orgonity";
+  REQUIRE(bootamp::foundation::resume_save(s).has_value());
+
+  auto loaded = bootamp::foundation::resume_load();
+  REQUIRE(loaded.has_value());
+  REQUIRE(loaded->path == "https://c16.radioboss.fm:18014/stream");
+  REQUIRE(loaded->position_sec == 0);
+  REQUIRE(loaded->screen == "gieres");
+  REQUIRE(loaded->screen_tab == "orgonity");
+}
+
+TEST_CASE("resume screen-only state persists without a source",
+          "[foundation][resume]") {
+  TempRoot tmp;
+  auto g = env_isolate_appdir(tmp.path());
+
+  // A session that left a panel open but nothing playing: the panel alone
+  // persists (no source, no position).
+  bootamp::foundation::ResumeState s;
+  s.screen = "radio";
+  REQUIRE(bootamp::foundation::resume_save(s).has_value());
+  REQUIRE(fs::exists(tmp.path() / ".config" / "bootamp" / "resume.json"));
+
+  auto loaded = bootamp::foundation::resume_load();
+  REQUIRE(loaded.has_value());
+  REQUIRE(loaded->path.empty());
+  REQUIRE(loaded->position_sec == 0);
+  REQUIRE(loaded->playlist.empty());
+  REQUIRE(loaded->screen == "radio");
+  REQUIRE(loaded->screen_tab.empty());
+}
+
+TEST_CASE("resume load ignores a pre-screen file (no screen fields)",
+          "[foundation][resume]") {
+  TempRoot tmp;
+  auto g = env_isolate_appdir(tmp.path());
+
+  auto dir = tmp.path() / ".config" / "bootamp";
+  fs::create_directories(dir);
+  write_raw(dir / "resume.json",
+            R"({"path":"/music/old.mp3","position_sec":33})", 0600);
+
+  auto loaded = bootamp::foundation::resume_load();
+  REQUIRE(loaded.has_value());
+  REQUIRE(loaded->path == "/music/old.mp3");
+  REQUIRE(loaded->position_sec == 33);
+  REQUIRE(loaded->screen.empty());
+  REQUIRE(loaded->screen_tab.empty());
 }
 
 // ---------------------------------------------------------------------------
