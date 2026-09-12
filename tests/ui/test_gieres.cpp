@@ -8,6 +8,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
+#include <cstdio>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -19,6 +21,28 @@ using namespace bootamp::ui::screens;
 using bootamp::playlist::Track;
 
 namespace {
+
+// iso_days renders a sys_days as YYYY-MM-DD (the model's date_string twin —
+// the calendar tests compute the same UTC "today" the model bisects to).
+std::string iso_days(std::chrono::sys_days d) {
+  const std::chrono::year_month_day ymd{d};
+  char buf[16];
+  std::snprintf(buf, sizeof buf, "%04d-%02d-%02d",
+                static_cast<int>(ymd.year()), static_cast<unsigned>(ymd.month()),
+                static_cast<unsigned>(ymd.day()));
+  return buf;
+}
+
+std::string iso_today() {
+  return iso_days(std::chrono::floor<std::chrono::days>(
+      std::chrono::system_clock::now()));
+}
+
+std::string iso_days_back(const int n) {
+  return iso_days(std::chrono::floor<std::chrono::days>(
+                      std::chrono::system_clock::now()) -
+                  std::chrono::days{n});
+}
 
 // pump_until_done spins pump() until the background fetch landed (the
 // test_screens.cpp lazy-catalog pattern: yield until loading clears, then one
@@ -84,12 +108,16 @@ const std::string kSegmentsJson = R"json({
   })json";
 
 // FakeArchive captures every fetch call for assertions and hands back canned
-// results; `fail` switches each hook to an error return.
+// results; `fail` switches each hook to an error return. coverage_from is the
+// timeline's first day for the date-index bisection (fetch_dates probes
+// 1-hour day windows): windows starting before it return no segments. Empty =
+// every window is covered (the all-or-nothing fake the other tests use).
 struct FakeArchive {
   GieresListing listing;
   GieresDay     day;
   std::vector<GieresSegment> segments;
   std::string   now_playing = "Radio Radio ..::.. Pink Floyd \"Hey You\"";
+  std::string   coverage_from;
   bool          fail = false;
 
   int org_calls = 0;
@@ -118,11 +146,19 @@ struct FakeArchive {
       }
       return std::expected<GieresDay, std::string>(day);
     };
-    auto segs = [this](std::string_view, std::string_view) {
+    auto segs = [this](std::string_view start, std::string_view) {
       ++seg_calls;
       if (fail) {
         return std::expected<std::vector<GieresSegment>, std::string>(
             std::unexpected("gieres: connection refused"));
+      }
+      // The calendar bisection probes a day's first hour; its start's first
+      // ten bytes are the day — windows below the timeline's first day are
+      // dark (the real server has no segments there either).
+      if (!coverage_from.empty() &&
+          std::string{start.substr(0, 10)} < coverage_from) {
+        return std::expected<std::vector<GieresSegment>, std::string>(
+            std::vector<GieresSegment>{});
       }
       return std::expected<std::vector<GieresSegment>, std::string>(segments);
     };
@@ -425,31 +461,38 @@ TEST_CASE("echelon t expands the program listing; enter plays the segment",
   REQUIRE_FALSE(m.visible());
 }
 
-TEST_CASE("echelon d opens the date index; enter fetches that day",
+TEST_CASE("echelon d opens the timeline calendar; enter fetches that day",
           "[gieres][model]") {
   FakeArchive fake;
   fake.listing  = fixture_listing();  // dates_ ride the /orgonity.json fetch
   fake.segments = fixture_segments();
+  fake.coverage_from = iso_days_back(2);  // the timeline covers the last 3 days
   GieresModel m = fake.make();
   m.set_actions(GieresActions{.on_play_track = {},
                               .on_append_track  = {},
                               .on_append_tracks = {}});
   m.open();
   pump_until_done(m);   // settle Live first
-  m.handle_key("tab");  // → Orgonity — this loads dates_
+  m.handle_key("tab");  // → Orgonity — this loads dates_ (recording_dates)
   pump_until_done(m);
   m.handle_key("tab");  // → Echelon
   pump_until_done(m);
-  const int base_seg_calls = fake.seg_calls;
+  const int org_calls_after_orgonity = fake.org_calls;
 
   m.handle_key("d");
-  REQUIRE(m.row_count() == 3);  // same date index as Orgonity
-  m.handle_key("down");
-  m.handle_key("down");  // → "2021-11-19"
+  pump_until_dates(m);
+  // The calendar is not orgonity data: no extra /orgonity.json call fired.
+  REQUIRE(fake.org_calls == org_calls_after_orgonity);
+  REQUIRE(m.row_count() == 3);  // the calendar: [t-2, t-1, t]
+  REQUIRE(m.row_label(2, 0) == "> " + iso_today());  // opens on the shown day
+  REQUIRE(m.row_label(0, 0) == "  " + iso_days_back(2));
+  m.handle_key("up");
+  m.handle_key("up");  // → the timeline's first day
+  const int loaded_seg_calls = fake.seg_calls;
   m.handle_key("enter");
   pump_until_done(m);
-  REQUIRE(fake.seg_calls == base_seg_calls + 1);  // a fresh day-window fetch
-  REQUIRE(m.row_count() == 2);                    // back to segments
+  REQUIRE(fake.seg_calls == loaded_seg_calls + 1);  // a fresh day-window fetch
+  REQUIRE(m.row_count() == 2);                      // back to segments
 
   // esc closes the index without closing the screen.
   m.handle_key("d");
@@ -459,15 +502,18 @@ TEST_CASE("echelon d opens the date index; enter fetches that day",
   REQUIRE(m.row_count() == 2);
 }
 
-// The reported bug: `d` in Echelon with dates_ never loaded (no Orgonity
-// visit) showed only the dim hint row. The toggle now self-loads the index
-// with one page-1 /orgonity.json fetch (recording_dates is complete on every
-// page) on its own thread, so the shared fetch lifecycle stays untouched.
-TEST_CASE("echelon d self-loads the date index without an Orgonity visit",
+// The reported bug: the Echelon date index was the orgonity recording_dates
+// subset (days with an uploaded recording), so days the timeline covers with
+// no recording — and today, until the show is archived — were missing. The
+// index is now the timeline's own calendar: fetch_dates bisects the timeline
+// (1-hour /echelon/segments window probes) for its first day and emits every
+// day through today; pressing d in Echelon never touches the orgonity hook.
+TEST_CASE("echelon d self-loads the timeline calendar without an Orgonity visit",
           "[gieres][model]") {
   FakeArchive fake;
   fake.listing  = fixture_listing();
   fake.segments = fixture_segments();
+  fake.coverage_from = iso_days_back(2);
   GieresModel m = fake.make();
   m.set_actions(GieresActions{.on_play_track = {},
                               .on_append_track  = {},
@@ -477,31 +523,42 @@ TEST_CASE("echelon d self-loads the date index without an Orgonity visit",
   m.handle_key("shift+tab");  // Live → Echelon — Orgonity is never opened
   pump_until_done(m);         // the Echelon day (segments) fetch
   REQUIRE(fake.seg_calls == 1);
-  REQUIRE(fake.org_calls == 0);  // the bug's precondition: dates_ is empty
-  const int base_seg_calls = fake.seg_calls;
+  REQUIRE(fake.org_calls == 0);  // the bug's precondition: no orgonity data
 
-  m.handle_key("d");           // the date index self-loads now
+  m.handle_key("d");           // the timeline calendar self-loads now
   REQUIRE_FALSE(m.loading());  // the dates fetch runs on its own thread
   pump_until_dates(m);
-  REQUIRE(fake.org_calls == 1);  // exactly one page-1 fetch
-  REQUIRE(std::get<0>(fake.org_args.back()) == 1);
-  REQUIRE(std::get<1>(fake.org_args.back()) == "");  // no query
-  REQUIRE(std::get<2>(fake.org_args.back()) == "date");
-  REQUIRE(m.row_count() == 3);  // the hint row became the date index
-  REQUIRE(m.row_label(0, 0) == "> 2010-04-13");
+  REQUIRE(fake.org_calls == 0);
+  REQUIRE(m.row_count() == 3);  // the hint row became the timeline calendar
+  REQUIRE(m.row_label(2, 0) == "> " + iso_today());   // opens on the shown day
+  REQUIRE(m.row_label(0, 0) == "  " + iso_days_back(2));
   REQUIRE_FALSE(m.row_dim(0));
 
-  // dates_ is loaded now: retoggling neither refetches nor reshapes anything.
+  // The calendar is loaded: retoggling neither refetches nor reshapes.
   m.handle_key("esc");
   REQUIRE(m.row_count() == 2);  // back to the segment list
   m.handle_key("d");
   REQUIRE(m.row_count() == 3);
-  REQUIRE(fake.org_calls == 1);
-  // enter on a date still selects the shown Echelon day (segments fetch).
+  const int loaded_seg_calls = fake.seg_calls;
+  // enter on a day still selects the shown Echelon day (segments fetch).
   m.handle_key("enter");
   pump_until_done(m);
-  REQUIRE(fake.seg_calls == base_seg_calls + 1);
+  REQUIRE(fake.seg_calls == loaded_seg_calls + 1);
   REQUIRE(m.row_count() == 2);
+
+  // ';' steps back a day (a day-window fetch), "'" steps forward, and at
+  // today "'" is clamped — the timeline has no future to fetch.
+  const int stepped_seg_calls = fake.seg_calls;
+  m.handle_key(";");
+  pump_until_done(m);
+  REQUIRE(fake.seg_calls == stepped_seg_calls + 1);
+  REQUIRE(m.row_count() == 2);
+  m.handle_key("'");
+  pump_until_done(m);
+  REQUIRE(fake.seg_calls == stepped_seg_calls + 2);
+  m.handle_key("'");
+  pump_until_done(m);
+  REQUIRE(fake.seg_calls == stepped_seg_calls + 2);  // clamped at today
 }
 
 TEST_CASE("maybe_load_more appends the next page near the bottom",

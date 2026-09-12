@@ -19,10 +19,15 @@
 // index it selects the date — Orgonity opens the day, Echelon fetches the
 // day's segments); y appends (in Echelon: the whole day's segments, so the
 // queue chains them gapless); / searches Orgonity; s cycles the Orgonity
-// sort; d toggles the date index (Orgonity recording list / Echelon segment
-// list — the Echelon index self-loads on the first d, no Orgonity visit
-// needed); t expands the Echelon program listing; ctrl+r refetches; esc walks
-// back a level and finally closes the screen. ←/→ are never consumed — they
+// sort; d toggles the date index (Orgonity: the server's recording_dates —
+// days with an uploaded recording; Echelon: the timeline's OWN calendar —
+// every day from the timeline's first day through today, discovered by
+// probing /echelon/segments — because the timeline covers days with no
+// recording, and today until the show is archived; it self-loads on the
+// first d, no Orgonity visit needed); ; / ' step to the previous / next day
+// (inside the date index they walk the cursor instead); t expands the
+// Echelon program listing; ctrl+r refetches; esc walks back a level and
+// finally closes the screen. ←/→ are never consumed — they
 // reach the global player table and wind the playing track (seek ±5s,
 // shift+left/right large seek), which is what the user expects while
 // listening to archive recordings; the list navigates with up/down (j/k),
@@ -196,9 +201,10 @@ private:
   // fetch is single-flight; the request key snapshots the state it was
   // launched for.
   void fetch(bool append = false);
-  // fetch_dates loads the shared date index for the Echelon `d` toggle with
-  // no prior Orgonity visit: one page-1 /orgonity.json fetch (recording_dates
-  // is complete on every page, gieres_client.hpp). Single-flight via
+  // fetch_dates loads the Echelon `d` date index — the timeline's own
+  // calendar: /echelon/segments has no range endpoint, so the first covered
+  // day is found by bisection (one 1-hour-window probe per step) and the
+  // contiguous day list runs through today. Single-flight via
   // dates_loading_, on its own thread + mailbox — see the members below.
   void fetch_dates();
   void normalize();   // clamp cursor/scroll after list changes
@@ -213,6 +219,12 @@ private:
   // enter / y on the cursor entry (view-dependent).
   void play_cursor();
   void append_cursor();
+  // select_echelon_day switches the shown Echelon day and fetches its
+  // segments — the date index's enter and the ;/' day step land here.
+  void select_echelon_day(std::string date);
+  // ech_index_row is the calendar row of `date` (the newest row when absent —
+  // the index toggle lands the cursor there).
+  int  ech_index_row(const std::string& date) const;
 
   OrgonityFn   orgonity_fn_;
   ByDateFn     by_date_fn_;
@@ -224,7 +236,8 @@ private:
   View   view_         = View::Live;
   OrgView org_view_    = OrgView::List;
 
-  // Orgonity list state. dates_ rides along every /orgonity.json fetch.
+  // Orgonity list state. dates_ rides along every /orgonity.json fetch (the
+  // Orgonity date index; the Echelon index has its own calendar below).
   std::vector<GieresBroadcast> recordings_;
   std::vector<std::string>     dates_;
   GieresDay                    day_;   // OrgView::Day content
@@ -239,13 +252,16 @@ private:
   // Echelon state: the day cursor (YYYY-MM-DD, UTC window) and its segments.
   // expanded_seg_ >= 0 shows the program listing (tracks[]) of that segment
   // inline below its row; ech_dates_ swaps the segment list for the date
-  // index (d) — a selected date becomes the shown Echelon day. dates_ is
-  // shared with the Orgonity date index and self-loads (fetch_dates) on the
-  // first d press, so the Orgonity tab need not be visited first.
+  // index (d) — a selected date becomes the shown Echelon day. The index list
+  // (ech_dates_list_) is the timeline's OWN calendar, fetched by fetch_dates
+  // (probing /echelon/segments) on the first d press — distinct from dates_
+  // (the Orgonity recording_dates subset): the timeline covers days with no
+  // uploaded recording, and today until the show is archived.
   std::string                 ech_date_;
   std::vector<GieresSegment>  segments_;
   int                         expanded_seg_ = -1;
   bool                        ech_dates_ = false;
+  std::vector<std::string>    ech_dates_list_;
 
   // Live view state.
   std::string now_playing_;
@@ -279,15 +295,18 @@ private:
     // append=true → the page was fetched for a near-bottom lazy load; pump
     // merges the broadcasts into the existing list instead of replacing it.
     bool append = false;
-    // for_dates=true → the fetch only fills dates_ (the Echelon date index);
-    // pump applies it before the staleness guard because it may arrive while
-    // the user is on another tab (the dates are identical on every page, so a
-    // late result is harmless). It rides the dedicated dates_inbox_ mailbox.
+    // for_dates=true → the fetch fills the Echelon date index: the timeline's
+    // OWN calendar (every day from the timeline's first day through today, in
+    // ech_dates), not the orgonity recording_dates subset. pump applies it
+    // before the staleness guard because it may arrive while the user is on
+    // another tab (the calendar is view-independent, so a late result is
+    // harmless). It rides the dedicated dates_inbox_ mailbox.
     bool for_dates = false;
     // Payload (one per fetch kind).
     bool                        ok = false;
     std::string                 fetch_error;
     GieresListing               listing;
+    std::vector<std::string>    ech_dates;  // for_dates: the timeline calendar
     GieresDay                   day;
     std::vector<GieresSegment>  segments;
     std::string                 now_playing;

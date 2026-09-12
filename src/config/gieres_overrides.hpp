@@ -1,16 +1,17 @@
 // config/gieres_overrides.hpp — user override for the Gieres endpoint.
 //
-// The Giereś archive (docs/orgonity-api.md) is reachable two ways: the LAN
-// base (http://192.168.1.154:13080 — the default, fastest) and the public
-// domain (https://gieres.cytr.us). The endpoint is chosen in priority order:
+// The Giereś archive (docs/orgonity-api.md) is reachable two ways: the public
+// domain (https://gieres.cytr.us — the built-in default) and the author's LAN
+// base (http://192.168.1.154:13080, the fastest route on that network). The
+// endpoint is chosen in priority order:
 //
 //   1. <config_dir>/gieres.ini  `base_url` (this file; user pins an endpoint)
 //   2. bootamp.toml             `gieres_base_url`
-//   3. built-in default         http://192.168.1.154:13080
+//   3. built-in default         https://gieres.cytr.us
 //
 // On top of that the archive screen keeps a sticky session fallback: a
-// connection-level failure on the chosen base retries the public domain once
-// and sticks to the winner for the session (ui/screens/gieres.cpp for_host).
+// connection-level failure on the chosen base retries the LAN base once and
+// sticks to the winner for the session (ui/screens/gieres.cpp for_host).
 //
 // The parser is deliberately tiny — "key = value" lines, `#`/`;` comments,
 // unknown keys ignored — and the testable core takes the file text, so tests

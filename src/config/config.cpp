@@ -364,7 +364,7 @@ void Config::clamp() {
   spotify.bitrate   = clamp_spotify_bitrate(spotify.bitrate);
   padding_h         = std::clamp(padding_h, 0, 10);
   padding_v         = std::clamp(padding_v, 0, 5);
-  if (gieres_base_url.empty()) gieres_base_url = "http://192.168.1.154:13080";
+  if (gieres_base_url.empty()) gieres_base_url = "https://gieres.cytr.us";
   if (low_power) visualizer = "none";
 }
 

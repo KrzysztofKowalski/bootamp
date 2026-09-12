@@ -163,7 +163,7 @@ struct Config {
   std::string provider;          // "radio"/"navidrome"/"spotify"/... (default "radio")
   std::string theme;
   std::string visualizer;        // "" = default (Bars)
-  std::string gieres_base_url = "http://192.168.1.154:13080";  // Giereś archive (p)
+  std::string gieres_base_url = "https://gieres.cytr.us";  // Giereś archive (p); LAN via gieres.ini
 
   // Output device / resampling
   int          sample_rate      = 0;     // 0 = auto-detect; else 22050/44100/48000/96000/192000

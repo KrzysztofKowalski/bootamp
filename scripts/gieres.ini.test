@@ -1,5 +1,7 @@
-# Gieres "Radio Radio" endpoint override for bootamp.
+# Gieres "Radio Radio" endpoint override for bootamp — test config.
 # Copy to ~/.config/bootamp/gieres.ini and edit. Keys:
-#   base_url — archive server base (LAN default, public fallback below).
+#   base_url — archive server base. The built-in default is the public
+#   endpoint below; the LAN server is the author's fastest route
+#   (docs/orgonity-api.md).
+base_url = https://gieres.cytr.us
 # base_url = http://192.168.1.154:13080
-# base_url = https://gieres.cytr.us

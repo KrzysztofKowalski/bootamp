@@ -36,6 +36,19 @@ std::string date_string(const std::chrono::year_month_day ymd) {
   return buf;
 }
 
+// sys_today is the UTC date of "now" — the Echelon calendar's newest day and
+// the next-day step's clamp.
+std::chrono::sys_days sys_today() {
+  return std::chrono::floor<std::chrono::days>(
+      std::chrono::system_clock::now());
+}
+
+// kTimelineFirstProbe is the earliest day the Echelon date-index bisection
+// probes (the timeline began 2026-05; the bound only adds bisection steps of
+// headroom in case older segments ever get backfilled).
+inline constexpr std::chrono::year_month_day kTimelineFirstProbe{
+    std::chrono::year{2009}, std::chrono::January, std::chrono::day{1}};
+
 // parse_ymd reads "YYYY-MM-DD" (ok() == false on garbage). The failure value
 // is an explicit out-of-range date — the default constructor leaves the
 // fields uninitialized.
@@ -123,9 +136,7 @@ GieresModel::GieresModel(OrgonityFn orgonity, ByDateFn by_date,
       base_url_(base_url),
       active_base_(std::move(active_base)) {
   // Echelon starts on today's UTC day (the segments window is UTC).
-  ech_date_ = date_string(
-      std::chrono::year_month_day{std::chrono::floor<std::chrono::days>(
-          std::chrono::system_clock::now())});
+  ech_date_ = date_string(std::chrono::year_month_day{sys_today()});
 }
 
 GieresModel::~GieresModel() {
@@ -293,11 +304,12 @@ GieresModel GieresModel::for_host(std::string_view base_url) {
     };
   };
   const std::string primary{base_url};
-  // The public domain (docs/orgonity-api.md §1 — same Rails server) is the
-  // sticky fallback for the LAN: off the home network the LAN base only
-  // times out, so a transport error flips fetches to the public endpoint and
-  // they stick there for the session (pump() adopts it into base_url_).
-  const std::string fallback{"https://gieres.cytr.us"};
+  // The published build defaults to the public domain (config.hpp), so the
+  // sticky fallback goes the other way — the author's LAN server
+  // (docs/orgonity-api.md), the fastest route for machines on that network.
+  // A transport error on the chosen base flips fetches to the other endpoint
+  // and they stick there for the session (pump() adopts it into base_url_).
+  const std::string fallback{"http://192.168.1.154:13080"};
   auto hooks = make_hooks(primary);
   if (fallback == primary) {
     return GieresModel(std::move(hooks.orgonity), std::move(hooks.by_date),
@@ -339,12 +351,16 @@ int GieresModel::list_count() const {
       }
       return 0;
     case View::Echelon:
-      // The Echelon date index (d): one row per date with recordings; with
-      // no dates loaded yet a single hint row (the index self-loads via
+      // The Echelon date index (d): one row per timeline day — the calendar
+      // spans the timeline's first day through today (the server has no
+      // segments before its first day, probed by fetch_dates); with no
+      // calendar loaded yet a single hint row (the index self-loads via
       // fetch_dates(), so the hint shows only while that fetch is in flight
       // — or after it failed, the error surfaces in the footer status).
       if (ech_dates_) {
-        return dates_.empty() ? 1 : static_cast<int>(dates_.size());
+        return ech_dates_list_.empty()
+                   ? 1
+                   : static_cast<int>(ech_dates_list_.size());
       }
       break;
   }
@@ -508,12 +524,17 @@ void GieresModel::fetch(const bool append) {
   });
 }
 
-// fetch_dates loads the shared date index (dates_) behind the Echelon `d`
-// toggle: one page-1 /orgonity.json fetch — recording_dates is complete on
-// every page (gieres_client.hpp), so no paging is involved. It runs on its
-// own thread + mailbox (dates_inbox_) so it never cancels an in-flight view
-// fetch and never clobbers one in the single-slot inbox_; NOT touching
-// requested_page_ keeps the staleness key of the user's current tab intact.
+// fetch_dates loads the Echelon date index (ech_dates_list_) — the timeline's
+// OWN calendar, not the orgonity recording_dates subset: the timeline covers
+// days with no uploaded recording, and today until the show is archived.
+// /echelon/segments has no range endpoint, so the first covered day is found
+// by bisection (one 1-hour-window probe per step, ~log2 of the probed range)
+// and the contiguous day list runs through today — gap days included
+// (selecting one shows the day window's "no segments", which is exactly what
+// the server returns). It runs on its own thread + mailbox (dates_inbox_) so
+// it never cancels an in-flight view fetch and never clobbers one in the
+// single-slot inbox_; NOT touching requested_page_ keeps the staleness key of
+// the user's current tab intact.
 void GieresModel::fetch_dates() {
   bool expected = false;
   if (!dates_loading_.compare_exchange_strong(expected, true)) {
@@ -523,13 +544,13 @@ void GieresModel::fetch_dates() {
   // no staleness key here: pump applies a for_dates result wherever the user
   // has navigated in the meantime).
   auto key = std::make_shared<FetchResult>();
-  key->view      = View::Orgonity;
+  key->view      = View::Echelon;
   key->org       = OrgView::List;
   key->page      = 1;
   key->query     = "";
   key->sort      = "date";
   key->for_dates = true;
-  status_ = "fetching dates…";
+  status_ = "loading timeline days…";
   if (dates_thread_.joinable()) {
     dates_thread_.request_stop();
     dates_thread_.join();
@@ -539,31 +560,144 @@ void GieresModel::fetch_dates() {
       return;
     }
     auto result = std::make_shared<FetchResult>(*key);
-    auto listing = orgonity_fn_(key->page, key->query, key->sort);
-    if (listing) {
-      result->ok      = true;
-      result->listing = std::move(*listing);
-    } else {
-      result->fetch_error = std::move(listing).error();
+    // covered(day) — does the timeline have any segment in the day's first
+    // hour? A transport error (both fallback endpoints failed inside the
+    // hook) aborts the whole index fetch; an empty window is just "that day
+    // is dark".
+    const auto covered = [this](std::chrono::sys_days d)
+        -> std::expected<bool, std::string> {
+      const std::string day = date_string(std::chrono::year_month_day{d});
+      auto segs = segments_fn_(day + "T00:00:00Z", day + "T01:00:00Z");
+      if (!segs) {
+        return std::unexpected(std::move(segs).error());
+      }
+      return !segs->empty();
+    };
+    const auto fail = [&](std::string err) {
+      result->fetch_error = std::move(err);
+      dates_inbox_.store(std::move(result), std::memory_order_release);
+    };
+    // Anchor the search top (hi must be covered): usually today's first hour
+    // has segments; a server hiccup right now walks a few days back instead
+    // of failing the whole calendar.
+    std::chrono::sys_days hi = sys_today();
+    auto anchor = covered(hi);
+    for (int back = 0; back < 7; ++back) {
+      if (!anchor) {
+        fail(std::move(anchor).error());
+        return;
+      }
+      if (*anchor) {
+        break;
+      }
+      if (stoken.stop_requested()) {
+        return;
+      }
+      hi -= std::chrono::days{1};
+      anchor = covered(hi);
     }
+    if (!anchor) {
+      fail(std::move(anchor).error());
+      return;
+    }
+    if (!*anchor) {
+      fail("echelon timeline: no segments found");
+      return;
+    }
+    // Bisection below the anchor: lo uncovered, hi covered, converge to the
+    // first covered day (probes stay inside [kTimelineFirstProbe, anchor]).
+    std::chrono::sys_days lo{kTimelineFirstProbe};
+    const auto floor_probe = covered(lo);
+    if (!floor_probe) {
+      fail(std::move(floor_probe).error());
+      return;
+    }
+    if (*floor_probe) {
+      hi = lo;  // the timeline reaches the probe floor — bisect nothing
+    } else {
+      while (hi - lo > std::chrono::days{1}) {
+        if (stoken.stop_requested()) {
+          return;
+        }
+        const auto mid = lo + (hi - lo) / 2;
+        const auto hit = covered(mid);
+        if (!hit) {
+          fail(std::move(hit).error());
+          return;
+        }
+        if (*hit) {
+          hi = mid;
+        } else {
+          lo = mid;
+        }
+      }
+      // The bisection may have parked one day above the real first day when
+      // a timeline gap sat in between — probe two days below to recover it
+      // (one gap step, then stop; two consecutive gaps lose nothing that
+      // matters, the calendar grows down to the first covered day at worst
+      // one day late).
+      if (hi - std::chrono::days{1} >= lo) {
+        const auto below = covered(hi - std::chrono::days{1});
+        if (!below) {
+          fail(std::move(below).error());
+          return;
+        }
+        if (!*below && hi - std::chrono::days{2} >= lo) {
+          const auto below2 = covered(hi - std::chrono::days{2});
+          if (!below2) {
+            fail(std::move(below2).error());
+            return;
+          }
+          if (*below2) {
+            hi -= std::chrono::days{2};
+          }
+        }
+      }
+    }
+    // The calendar: every day from the first covered day through today —
+    // gap days included (the day window fetch reports them as empty).
+    std::vector<std::string> days;
+    for (auto d = hi; d <= sys_today(); d += std::chrono::days{1}) {
+      days.push_back(date_string(std::chrono::year_month_day{d}));
+    }
+    result->ok        = true;
+    result->ech_dates = std::move(days);
     dates_inbox_.store(std::move(result), std::memory_order_release);
   });
 }
 
 void GieresModel::pump() {
+  // Sticky endpoint adoption (UI thread only): a fallback fetch — a view
+  // fetch or a date-index probe — recorded the endpoint that answered; the
+  // footer and the playback URLs follow it even when the result turns out
+  // stale below.
+  if (active_base_) {
+    auto base = active_base_->get();
+    if (!base.empty() && base != base_url_) {
+      base_url_ = std::move(base);
+    }
+  }
   // The date-index mailbox first: a for_dates result bypasses the staleness
-  // guard on purpose (fetch_dates) — the dates are identical on every
-  // /orgonity.json page, so a late result is harmless, while the guard would
+  // guard on purpose (fetch_dates) — the timeline calendar is
+  // view-independent, so a late result is harmless, while the guard would
   // reject it because the user sits on another tab (typically View::Echelon)
   // when the fetch was launched.
   if (const auto dates =
           dates_inbox_.exchange(nullptr, std::memory_order_acquire)) {
     dates_loading_.store(false, std::memory_order_release);
     if (dates->ok) {
-      dates_ = std::move(dates->listing.recording_dates);
+      ech_dates_list_ = std::move(dates->ech_dates);
       status_.clear();
-    } else if (dates_.empty()) {
+      // Land the index cursor on the shown day (today at first open) — the
+      // calendar's newest row is the useful one, the oldest is scroll-far.
+      if (view_ == View::Echelon && ech_dates_ && !ech_dates_list_.empty()) {
+        cursor_ = ech_index_row(ech_date_);
+        normalize();
+      }
+    } else if (ech_dates_list_.empty()) {
       status_ = dates->fetch_error;  // the hint row stays; the error shows
+    } else {
+      status_.clear();  // a refetch failed, but the loaded calendar still shows
     }
     normalize();
   }
@@ -574,15 +708,6 @@ void GieresModel::pump() {
   // The worker finished — clear the single-flight flag before any staleness
   // decision (a dropped result must not wedge loading_ on).
   loading_.store(false, std::memory_order_release);
-  // Sticky endpoint adoption (UI thread only): a fallback fetch recorded the
-  // endpoint that answered — the footer and the playback URLs follow it even
-  // when this particular result turns out stale below.
-  if (active_base_) {
-    auto base = active_base_->get();
-    if (!base.empty() && base != base_url_) {
-      base_url_ = std::move(base);
-    }
-  }
   // Stale fetch (the view moved on): drop silently. The page compares
   // against requested_page_ (the in-flight fetch's target), not page_ — a
   // lazy append load targets page_+1 while page_ still shows the current one.
@@ -592,6 +717,14 @@ void GieresModel::pump() {
     // The Day sub-view keys on day_.date, not ech_date_.
     if (!(result->view == View::Orgonity && org_view_ == OrgView::Day &&
           result->date == day_.date)) {
+      // A day step (; / ') or a date-index enter that landed while another
+      // fetch was in flight would otherwise never fire: fetch() is
+      // single-flight (it skipped), and this result just dropped as stale —
+      // refetch the now-current day so the last selection still loads.
+      if (result->view == View::Echelon && view_ == View::Echelon &&
+          !ech_dates_) {
+        fetch();
+      }
       return;
     }
   }
@@ -694,18 +827,18 @@ std::string GieresModel::row_label(const int i, const int /*panel_width*/) const
       }
       return prefix;
     case View::Echelon:
-      // The Echelon date index (d): plain date rows like the Orgonity Dates
-      // list; until the self-load lands dates_ is empty and one dim hint row
+      // The Echelon date index (d): plain date rows of the timeline calendar;
+      // until the self-load lands the list is empty and one dim hint row
       // shows (an error surfaces in the footer status instead).
       if (ech_dates_) {
-        if (dates_.empty()) {
-          return prefix + "(loading the date index…)";
+        if (ech_dates_list_.empty()) {
+          return prefix + "(loading the timeline days…)";
         }
         const std::size_t idx = static_cast<std::size_t>(i);
-        if (idx >= dates_.size()) {
+        if (idx >= ech_dates_list_.size()) {
           return prefix;
         }
-        return prefix + dates_[idx];
+        return prefix + ech_dates_list_[idx];
       }
       break;
   }
@@ -738,8 +871,8 @@ std::string GieresModel::row_label(const int i, const int /*panel_width*/) const
 }
 
 bool GieresModel::row_dim(const int i) const {
-  // The Echelon date-index hint row (no dates loaded yet) renders dimmed.
-  if (view_ == View::Echelon && ech_dates_ && dates_.empty()) {
+  // The Echelon date-index hint row (no calendar loaded yet) renders dimmed.
+  if (view_ == View::Echelon && ech_dates_ && ech_dates_list_.empty()) {
     return true;
   }
   // Only no-audio recordings render dimmed; dates/segments are always live.
@@ -771,8 +904,8 @@ std::string GieresModel::header_label() const {
       head += "  — " + day_.date + "  (esc back)";
     }
   } else if (view_ == View::Echelon) {
-    head += ech_dates_ ? "  — dates with recordings (up/down, enter)"
-                       : "  — " + ech_date_ + "  (d dates)";
+    head += ech_dates_ ? "  — timeline days (up/down, enter)"
+                       : "  — " + ech_date_ + "  (d dates, ; ' prev/next day)";
   }
   return head;
 }
@@ -821,6 +954,35 @@ playlist::Track live_track() {
 
 }  // namespace
 
+// select_echelon_day switches the shown Echelon day and fetches its segments
+// — the date index's enter and the ;/' day step both land here. The program
+// expansion resets with the list it expanded into.
+void GieresModel::select_echelon_day(std::string date) {
+  if (date.empty()) {
+    return;
+  }
+  ech_date_     = std::move(date);
+  ech_dates_    = false;
+  cursor_       = 0;
+  scroll_       = 0;
+  expanded_seg_ = -1;
+  fetch();
+}
+
+// ech_index_row is the calendar row of `date` (the newest row when absent —
+// the index toggle lands the cursor there).
+int GieresModel::ech_index_row(const std::string& date) const {
+  if (ech_dates_list_.empty()) {
+    return 0;
+  }
+  for (std::size_t i = 0; i < ech_dates_list_.size(); ++i) {
+    if (ech_dates_list_[i] == date) {
+      return static_cast<int>(i);
+    }
+  }
+  return static_cast<int>(ech_dates_list_.size()) - 1;
+}
+
 void GieresModel::play_cursor() {
   switch (view_) {
     case View::Live:
@@ -857,19 +1019,14 @@ void GieresModel::play_cursor() {
       // enter on the date index selects the shown Echelon day (segments
       // fetch); it never plays anything.
       if (ech_dates_) {
-        if (dates_.empty()) {
+        if (ech_dates_list_.empty()) {
           return;
         }
         const std::size_t idx = static_cast<std::size_t>(cursor_);
-        if (idx >= dates_.size()) {
+        if (idx >= ech_dates_list_.size()) {
           return;
         }
-        ech_date_     = dates_[idx];
-        ech_dates_    = false;
-        cursor_       = 0;
-        scroll_       = 0;
-        expanded_seg_ = -1;
-        fetch();
+        select_echelon_day(ech_dates_list_[idx]);
         return;
       }
       const auto pos = echelon_pos(cursor_);
@@ -1096,17 +1253,21 @@ bool GieresModel::handle_key(const std::string_view key) {
   }
   if (key == "d") {
     // Orgonity: toggle the recording list / date index; Echelon: toggle the
-    // segment list / the same date index (a selected date becomes the shown
-    // Echelon day — the index self-loads on the first d when dates_ is empty,
-    // no Orgonity visit required). The Orgonity branch fetches once if dates_
-    // never arrived; the Live view falls through to the global device picker.
+    // segment list / the timeline calendar (a selected day becomes the shown
+    // Echelon day — the calendar self-loads on the first d via fetch_dates,
+    // no Orgonity visit required, and it opens on the shown day: today at
+    // first, the calendar's newest row being the useful default). The
+    // Orgonity branch fetches once if dates_ never arrived; the Live view
+    // falls through to the global device picker.
     if (view_ == View::Echelon) {
       ech_dates_ = !ech_dates_;
-      cursor_    = 0;
-      scroll_    = 0;
+      cursor_ = ech_dates_ && !ech_dates_list_.empty()
+                    ? ech_index_row(ech_date_)
+                    : 0;
+      scroll_ = 0;
       normalize();
-      if (ech_dates_ && dates_.empty()) {
-        fetch_dates();  // the date index self-loads; Orgonity visit not required
+      if (ech_dates_ && ech_dates_list_.empty()) {
+        fetch_dates();  // the timeline calendar self-loads; Orgonity not needed
       }
       return true;
     }
@@ -1155,6 +1316,34 @@ bool GieresModel::handle_key(const std::string_view key) {
       expanded_seg_ = pos.first;
     }
     normalize();
+    return true;
+  }
+  if ((key == ";" || key == "'") && view_ == View::Echelon) {
+    // Previous / next day. Inside the date index the keys walk the cursor
+    // over the day list (the list IS the day sequence); on the segment list
+    // they switch the shown day and fetch it — next stops at today (the
+    // timeline has no future), previous stops at the timeline's first day
+    // once the calendar is loaded.
+    if (ech_dates_) {
+      cursor_ += key == "'" ? 1 : -1;
+      normalize();
+      return true;
+    }
+    const auto cur = parse_ymd(ech_date_);
+    if (!cur.ok()) {
+      return true;
+    }
+    auto target = std::chrono::sys_days{cur};
+    target += key == "'" ? std::chrono::days{1} : -std::chrono::days{1};
+    if (key == "'" && target > sys_today()) {
+      return true;
+    }
+    if (key == ";" && !ech_dates_list_.empty() &&
+        date_string(std::chrono::year_month_day{target}) <
+            ech_dates_list_.front()) {
+      return true;
+    }
+    select_echelon_day(date_string(std::chrono::year_month_day{target}));
     return true;
   }
   if (key == "ctrl+r") {
