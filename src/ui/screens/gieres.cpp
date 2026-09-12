@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <optional>
 #include <utility>
 
 #if BOOTAMP_HAS_FTXUI
@@ -36,19 +37,6 @@ std::string date_string(const std::chrono::year_month_day ymd) {
   return buf;
 }
 
-// sys_today is the UTC date of "now" — the Echelon calendar's newest day and
-// the next-day step's clamp.
-std::chrono::sys_days sys_today() {
-  return std::chrono::floor<std::chrono::days>(
-      std::chrono::system_clock::now());
-}
-
-// kTimelineFirstProbe is the earliest day the Echelon date-index bisection
-// probes (the timeline began 2026-05; the bound only adds bisection steps of
-// headroom in case older segments ever get backfilled).
-inline constexpr std::chrono::year_month_day kTimelineFirstProbe{
-    std::chrono::year{2009}, std::chrono::January, std::chrono::day{1}};
-
 // parse_ymd reads "YYYY-MM-DD" (ok() == false on garbage). The failure value
 // is an explicit out-of-range date — the default constructor leaves the
 // fields uninitialized.
@@ -65,10 +53,100 @@ std::chrono::year_month_day parse_ymd(std::string_view s) {
   return ymd.ok() ? ymd : bad;
 }
 
-// hh_mm extracts "HH:MM" from an ISO8601 instant ("…T20:00:00Z").
+// hh_mm extracts "HH:MM" from an ISO8601 instant ("…T20:00:00Z") — the raw
+// UTC digits, local_hh_mm's fallback.
 std::string hh_mm(std::string_view iso) {
   return iso.size() >= 16 ? std::string{iso.substr(11, 5)} : std::string{};
 }
+
+// local_zone is the machine's timezone (current_zone, cached — the call
+// consults TZ each time; a session-stable zone is fine). Null when the tz
+// database is unavailable — everything degrades to plain UTC then.
+const std::chrono::time_zone* local_zone() {
+  static const std::chrono::time_zone* zone =
+      [] -> const std::chrono::time_zone* {
+    try {
+      return std::chrono::current_zone();
+    } catch (const std::exception&) {
+      return nullptr;
+    }
+  }();
+  return zone;
+}
+
+// format_instant_z renders a UTC time_point in the server's ISO8601 shape
+// ("YYYY-MM-DDTHH:MM:SSZ").
+std::string format_instant_z(std::chrono::sys_seconds tp) {
+  const auto day = std::chrono::floor<std::chrono::days>(tp);
+  const auto tod = std::chrono::hh_mm_ss{tp - day};
+  char buf[16];  // "HH:MM:SS" is 8 chars + NUL; sized like fmt_clock's
+  std::snprintf(buf, sizeof buf, "%02d:%02d:%02d",
+                static_cast<int>(tod.hours().count()),
+                static_cast<int>(tod.minutes().count()),
+                static_cast<int>(tod.seconds().count()));
+  return date_string(std::chrono::year_month_day{day}) + "T" + buf + "Z";
+}
+
+// parse_utc_instant reads the server's "YYYY-MM-DDTHH:MM:SSZ" shape
+// (nullopt on anything else).
+std::optional<std::chrono::sys_seconds> parse_utc_instant(
+    std::string_view iso) {
+  if (iso.size() != 20 || iso[10] != 'T' || iso[19] != 'Z') {
+    return std::nullopt;
+  }
+  const auto ymd = parse_ymd(iso.substr(0, 10));
+  if (!ymd.ok()) {
+    return std::nullopt;
+  }
+  int hh = 0, mm = 0, ss = 0;
+  if (std::sscanf(std::string{iso.substr(11, 8)}.c_str(), "%d:%d:%d",
+                  &hh, &mm, &ss) != 3 ||
+      hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 60) {
+    return std::nullopt;
+  }
+  return std::chrono::sys_seconds{std::chrono::sys_days{ymd}} +
+         std::chrono::hours{hh} + std::chrono::minutes{mm} +
+         std::chrono::seconds{ss};
+}
+
+// today_date is the machine-LOCAL calendar date of "now" — the Echelon
+// calendar's newest day and the next-day step's clamp (the user reads
+// Warsaw time; the archive's show dates are Warsaw-local too). Plain UTC
+// date without a tz database.
+std::chrono::year_month_day today_date() {
+  if (const auto* zone = local_zone()) {
+    return std::chrono::year_month_day{std::chrono::floor<std::chrono::days>(
+        zone->to_local(std::chrono::system_clock::now()))};
+  }
+  return std::chrono::year_month_day{std::chrono::floor<std::chrono::days>(
+      std::chrono::system_clock::now())};
+}
+
+// local_hh_mm renders an ISO8601 UTC instant as machine-local HH:MM —
+// segments' aired_at is UTC, the user reads Warsaw time (00:00Z airs at
+// 02:00 local, not midnight). Raw UTC digits are the fallback (malformed
+// instant or no tz database).
+std::string local_hh_mm(std::string_view iso) {
+  const auto* zone = local_zone();
+  const auto tp = parse_utc_instant(iso);
+  if (!zone || !tp) {
+    return hh_mm(iso);
+  }
+  const auto local = zone->to_local(*tp);
+  const auto tod = std::chrono::hh_mm_ss{
+      local - std::chrono::floor<std::chrono::days>(local)};
+  char buf[8];
+  std::snprintf(buf, sizeof buf, "%02d:%02d",
+                static_cast<int>(tod.hours().count()),
+                static_cast<int>(tod.minutes().count()));
+  return buf;
+}
+
+// kTimelineFirstProbe is the earliest day the Echelon date-index bisection
+// probes (the timeline began 2026-05; the bound only adds bisection steps of
+// headroom in case older segments ever get backfilled).
+inline constexpr std::chrono::year_month_day kTimelineFirstProbe{
+    std::chrono::year{2009}, std::chrono::January, std::chrono::day{1}};
 
 // fmt_duration renders seconds as "3h 6m" / "12m" / "45s" ("?" unknown).
 std::string fmt_duration(int secs) {
@@ -135,8 +213,9 @@ GieresModel::GieresModel(OrgonityFn orgonity, ByDateFn by_date,
       actions_(std::move(actions)),
       base_url_(base_url),
       active_base_(std::move(active_base)) {
-  // Echelon starts on today's UTC day (the segments window is UTC).
-  ech_date_ = date_string(std::chrono::year_month_day{sys_today()});
+  // Echelon starts on today's LOCAL day (the calendar and its windows are
+  // local — see gieres_day_window).
+  ech_date_ = date_string(today_date());
 }
 
 GieresModel::~GieresModel() {
@@ -498,19 +577,17 @@ void GieresModel::fetch(const bool append) {
         }
         break;
       case View::Echelon: {
-        // UTC day window (MVP): start=dayT00:00:00Z, end=next-dayT00:00:00Z —
-        // the archive slices the live timeline into 30-minute segments.
-        const auto ymd = parse_ymd(key->date);
-        if (!ymd.ok()) {
+        // LOCAL day window (gieres_day_window): the calendar's dates are the
+        // machine-local days the user thinks in — Europe/Warsaw fetches
+        // 2026-09-12 as "2026-09-11T22:00:00Z"…"2026-09-12T22:00:00Z", so a
+        // 2-AM show lands on its own day at its own wall-clock time. The
+        // archive slices that live timeline into 30-minute segments.
+        const auto window = gieres_day_window(key->date);
+        if (window.first.empty()) {
           result->fetch_error = "gieres: bad echelon date " + key->date;
           break;
         }
-        const std::string start = key->date + "T00:00:00Z";
-        const std::string end =
-            date_string(std::chrono::year_month_day{
-                std::chrono::sys_days{ymd} + std::chrono::days{1}}) +
-            "T00:00:00Z";
-        auto segs = segments_fn_(start, end);
+        auto segs = segments_fn_(window.first, window.second);
         if (segs) {
           result->ok       = true;
           result->segments = std::move(*segs);
@@ -560,14 +637,24 @@ void GieresModel::fetch_dates() {
       return;
     }
     auto result = std::make_shared<FetchResult>(*key);
-    // covered(day) — does the timeline have any segment in the day's first
-    // hour? A transport error (both fallback endpoints failed inside the
-    // hook) aborts the whole index fetch; an empty window is just "that day
-    // is dark".
+    // covered(day) — does the timeline have any segment in the local day's
+    // first hour? A transport error (both fallback endpoints failed inside
+    // the hook) aborts the whole index fetch; an empty window is just "that
+    // day is dark".
     const auto covered = [this](std::chrono::sys_days d)
         -> std::expected<bool, std::string> {
-      const std::string day = date_string(std::chrono::year_month_day{d});
-      auto segs = segments_fn_(day + "T00:00:00Z", day + "T01:00:00Z");
+      const auto window = gieres_day_window(
+          date_string(std::chrono::year_month_day{d}));
+      if (window.first.empty()) {
+        return std::unexpected("gieres: bad calendar day");
+      }
+      const auto start_tp = parse_utc_instant(window.first);
+      if (!start_tp) {
+        return std::unexpected("gieres: bad window for " + window.first);
+      }
+      auto segs = segments_fn_(window.first,
+                               format_instant_z(*start_tp +
+                                                std::chrono::hours{1}));
       if (!segs) {
         return std::unexpected(std::move(segs).error());
       }
@@ -580,7 +667,7 @@ void GieresModel::fetch_dates() {
     // Anchor the search top (hi must be covered): usually today's first hour
     // has segments; a server hiccup right now walks a few days back instead
     // of failing the whole calendar.
-    std::chrono::sys_days hi = sys_today();
+    std::chrono::sys_days hi{today_date()};
     auto anchor = covered(hi);
     for (int back = 0; back < 7; ++back) {
       if (!anchor) {
@@ -657,7 +744,8 @@ void GieresModel::fetch_dates() {
     // The calendar: every day from the first covered day through today —
     // gap days included (the day window fetch reports them as empty).
     std::vector<std::string> days;
-    for (auto d = hi; d <= sys_today(); d += std::chrono::days{1}) {
+    const std::chrono::sys_days today{today_date()};
+    for (auto d = hi; d <= today; d += std::chrono::days{1}) {
       days.push_back(date_string(std::chrono::year_month_day{d}));
     }
     result->ok        = true;
@@ -848,7 +936,7 @@ std::string GieresModel::row_label(const int i, const int /*panel_width*/) const
   for (std::size_t s = 0; s < segments_.size(); ++s) {
     const GieresSegment& seg = segments_[s];
     if (row == i) {
-      std::string label = hh_mm(seg.aired_at) + "  " + seg.title + "  (" +
+      std::string label = local_hh_mm(seg.aired_at) + "  " + seg.title + "  (" +
                           fmt_duration(seg.duration) + ")";
       if (expanded_seg_ >= 0 && static_cast<int>(s) == expanded_seg_) {
         label += "  [tracks shown]";
@@ -953,6 +1041,40 @@ playlist::Track live_track() {
 }
 
 }  // namespace
+
+// gieres_day_window maps a LOCAL calendar day ("YYYY-MM-DD") to the UTC
+// instant window the archive server sees for it (docs/orgonity-api.md §4):
+// local midnight to local midnight via the machine's timezone —
+// Europe/Warsaw turns 2026-09-12 into "2026-09-11T22:00:00Z"…
+// "2026-09-12T22:00:00Z". Without a tz database the window degrades to the
+// plain UTC day. Empty strings on a bad date. Exposed for the tests (the
+// fakes key the timeline coverage on these window strings).
+std::pair<std::string, std::string> gieres_day_window(
+    std::string_view date) {
+  const auto ymd = parse_ymd(date);
+  if (!ymd.ok()) {
+    return {"", ""};
+  }
+  if (const auto* zone = local_zone()) {
+    return {format_instant_z(zone->to_sys(
+                std::chrono::local_days{ymd} + std::chrono::seconds{0},
+                std::chrono::choose::earliest)),
+            format_instant_z(zone->to_sys(
+                std::chrono::local_days{ymd} + std::chrono::days{1},
+                std::chrono::choose::earliest))};
+  }
+  return {date_string(ymd) + "T00:00:00Z",
+          date_string(std::chrono::year_month_day{
+              std::chrono::sys_days{ymd} + std::chrono::days{1}}) +
+              "T00:00:00Z"};
+}
+
+// gieres_local_today is the machine-local calendar date of now
+// ("YYYY-MM-DD") — the Echelon calendar's newest day and the next-day
+// step's clamp. Exposed for the tests (they mirror the model's "today").
+std::string gieres_local_today() {
+  return date_string(today_date());
+}
 
 // select_echelon_day switches the shown Echelon day and fetches its segments
 // — the date index's enter and the ;/' day step both land here. The program
@@ -1335,7 +1457,7 @@ bool GieresModel::handle_key(const std::string_view key) {
     }
     auto target = std::chrono::sys_days{cur};
     target += key == "'" ? std::chrono::days{1} : -std::chrono::days{1};
-    if (key == "'" && target > sys_today()) {
+    if (key == "'" && target > std::chrono::sys_days{today_date()}) {
       return true;
     }
     if (key == ";" && !ech_dates_list_.empty() &&

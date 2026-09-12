@@ -24,7 +24,9 @@
 // every day from the timeline's first day through today, discovered by
 // probing /echelon/segments — because the timeline covers days with no
 // recording, and today until the show is archived; it self-loads on the
-// first d, no Orgonity visit needed); ; / ' step to the previous / next day
+// first d, no Orgonity visit needed); the calendar's days and the segment
+// times are LOCAL (machine timezone — the archive's show dates are
+// Warsaw-local too); ; / ' step to the previous / next day
 // (inside the date index they walk the cursor instead); t expands the
 // Echelon program listing; ctrl+r refetches; esc walks back a level and
 // finally closes the screen. ←/→ are never consumed — they
@@ -357,6 +359,21 @@ struct GieresFallbackHooks {
 GieresFallbackHooks gieres_with_fallback(GieresFallbackHooks primary,
                                          GieresFallbackHooks secondary,
                                          const std::shared_ptr<GieresActiveBase>& active);
+
+// gieres_day_window maps a LOCAL calendar day ("YYYY-MM-DD") to the UTC
+// instant window the archive server sees for it (docs/orgonity-api.md §4):
+// local midnight to local midnight via the machine's timezone —
+// Europe/Warsaw turns 2026-09-12 into "2026-09-11T22:00:00Z"…
+// "2026-09-12T22:00:00Z", so a 2-AM show lands on its own day at its own
+// wall-clock time. Without a tz database the window degrades to the plain
+// UTC day. Empty strings on a bad date. Exposed for the tests (the fakes
+// key the timeline coverage on these window strings).
+std::pair<std::string, std::string> gieres_day_window(std::string_view date);
+
+// gieres_local_today is the machine-local calendar date of now
+// ("YYYY-MM-DD") — the Echelon calendar's newest day and the next-day
+// step's clamp. Exposed for the tests (they mirror the model's "today").
+std::string gieres_local_today();
 
 #if BOOTAMP_HAS_FTXUI
 // FTXUI Component factory (compiled only when FTXUI is found; see gieres.cpp).

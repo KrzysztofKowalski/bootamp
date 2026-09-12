@@ -22,8 +22,7 @@ using bootamp::playlist::Track;
 
 namespace {
 
-// iso_days renders a sys_days as YYYY-MM-DD (the model's date_string twin —
-// the calendar tests compute the same UTC "today" the model bisects to).
+// iso_days renders a sys_days as YYYY-MM-DD (the model's date_string twin).
 std::string iso_days(std::chrono::sys_days d) {
   const std::chrono::year_month_day ymd{d};
   char buf[16];
@@ -33,15 +32,17 @@ std::string iso_days(std::chrono::sys_days d) {
   return buf;
 }
 
-std::string iso_today() {
-  return iso_days(std::chrono::floor<std::chrono::days>(
-      std::chrono::system_clock::now()));
-}
-
+// iso_days_back is n days before the model's "today" — the model and the
+// test share gieres_local_today() as the single source of truth, so the
+// expected calendar is exact regardless of the machine's timezone or the
+// hour the suite runs at.
 std::string iso_days_back(const int n) {
-  return iso_days(std::chrono::floor<std::chrono::days>(
-                      std::chrono::system_clock::now()) -
-                  std::chrono::days{n});
+  int y = 0, m = 0, d = 0;
+  std::sscanf(gieres_local_today().c_str(), "%d-%d-%d", &y, &m, &d);
+  const std::chrono::year_month_day ymd{
+      std::chrono::year{y} / std::chrono::month{static_cast<unsigned>(m)} /
+      std::chrono::day{static_cast<unsigned>(d)}};
+  return iso_days(std::chrono::sys_days{ymd} - std::chrono::days{n});
 }
 
 // pump_until_done spins pump() until the background fetch landed (the
@@ -108,10 +109,11 @@ const std::string kSegmentsJson = R"json({
   })json";
 
 // FakeArchive captures every fetch call for assertions and hands back canned
-// results; `fail` switches each hook to an error return. coverage_from is the
-// timeline's first day for the date-index bisection (fetch_dates probes
-// 1-hour day windows): windows starting before it return no segments. Empty =
-// every window is covered (the all-or-nothing fake the other tests use).
+// results; `fail` switches each hook to an error return. coverage_from is
+// the timeline's first covered WINDOW START (an ISO instant — the calendar
+// bisection probes the day windows, which compare chronologically as
+// strings): requested windows below it return no segments. Empty = every
+// window is covered (the all-or-nothing fake the other tests use).
 struct FakeArchive {
   GieresListing listing;
   GieresDay     day;
@@ -152,11 +154,11 @@ struct FakeArchive {
         return std::expected<std::vector<GieresSegment>, std::string>(
             std::unexpected("gieres: connection refused"));
       }
-      // The calendar bisection probes a day's first hour; its start's first
-      // ten bytes are the day — windows below the timeline's first day are
-      // dark (the real server has no segments there either).
-      if (!coverage_from.empty() &&
-          std::string{start.substr(0, 10)} < coverage_from) {
+      // The calendar bisection probes the local day's first hour; window
+      // starts below the timeline's first day are dark (the real server has
+      // no segments there either). ISO instants of fixed width compare
+      // chronologically as strings.
+      if (!coverage_from.empty() && std::string{start} < coverage_from) {
         return std::expected<std::vector<GieresSegment>, std::string>(
             std::vector<GieresSegment>{});
       }
@@ -466,7 +468,8 @@ TEST_CASE("echelon d opens the timeline calendar; enter fetches that day",
   FakeArchive fake;
   fake.listing  = fixture_listing();  // dates_ ride the /orgonity.json fetch
   fake.segments = fixture_segments();
-  fake.coverage_from = iso_days_back(2);  // the timeline covers the last 3 days
+  fake.coverage_from =
+      gieres_day_window(iso_days_back(2)).first;  // the last 3 local days
   GieresModel m = fake.make();
   m.set_actions(GieresActions{.on_play_track = {},
                               .on_append_track  = {},
@@ -484,7 +487,7 @@ TEST_CASE("echelon d opens the timeline calendar; enter fetches that day",
   // The calendar is not orgonity data: no extra /orgonity.json call fired.
   REQUIRE(fake.org_calls == org_calls_after_orgonity);
   REQUIRE(m.row_count() == 3);  // the calendar: [t-2, t-1, t]
-  REQUIRE(m.row_label(2, 0) == "> " + iso_today());  // opens on the shown day
+  REQUIRE(m.row_label(2, 0) == "> " + gieres_local_today());  // the shown day
   REQUIRE(m.row_label(0, 0) == "  " + iso_days_back(2));
   m.handle_key("up");
   m.handle_key("up");  // → the timeline's first day
@@ -513,7 +516,7 @@ TEST_CASE("echelon d self-loads the timeline calendar without an Orgonity visit"
   FakeArchive fake;
   fake.listing  = fixture_listing();
   fake.segments = fixture_segments();
-  fake.coverage_from = iso_days_back(2);
+  fake.coverage_from = gieres_day_window(iso_days_back(2)).first;
   GieresModel m = fake.make();
   m.set_actions(GieresActions{.on_play_track = {},
                               .on_append_track  = {},
@@ -530,7 +533,7 @@ TEST_CASE("echelon d self-loads the timeline calendar without an Orgonity visit"
   pump_until_dates(m);
   REQUIRE(fake.org_calls == 0);
   REQUIRE(m.row_count() == 3);  // the hint row became the timeline calendar
-  REQUIRE(m.row_label(2, 0) == "> " + iso_today());   // opens on the shown day
+  REQUIRE(m.row_label(2, 0) == "> " + gieres_local_today());  // the shown day
   REQUIRE(m.row_label(0, 0) == "  " + iso_days_back(2));
   REQUIRE_FALSE(m.row_dim(0));
 
@@ -559,6 +562,69 @@ TEST_CASE("echelon d self-loads the timeline calendar without an Orgonity visit"
   m.handle_key("'");
   pump_until_done(m);
   REQUIRE(fake.seg_calls == stepped_seg_calls + 2);  // clamped at today
+}
+
+// The local-day window: Europe/Warsaw fetches 2026-09-12 as
+// "2026-09-11T22:00:00Z"…"2026-09-12T22:00:00Z", so a 2-AM local show
+// (00:00Z) lands on its own day at its own wall-clock time — the window
+// must be exactly 24h starting at the local midnight.
+TEST_CASE("gieres_day_window is the local day's 24h UTC midnight pair",
+          "[gieres][model]") {
+  const auto w = gieres_day_window("2026-09-12");
+  REQUIRE(w.first.size() == 20);
+  REQUIRE(w.first.back() == 'Z');
+  REQUIRE(w.second.size() == 20);
+  REQUIRE(w.second.back() == 'Z');
+  REQUIRE(gieres_day_window("nonsense").first.empty());
+  REQUIRE(gieres_local_today().size() == 10);
+
+  const auto secs = [](std::string_view s) -> long long {
+    if (s.size() != 20) {
+      return -1;
+    }
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
+    if (std::sscanf(std::string{s}.c_str(), "%d-%d-%dT%d:%d:%d",
+                    &y, &mo, &d, &h, &mi, &sec) != 6) {
+      return -1;
+    }
+    const std::chrono::year_month_day ymd{
+        std::chrono::year{y} / std::chrono::month{static_cast<unsigned>(mo)} /
+        std::chrono::day{static_cast<unsigned>(d)}};
+    if (!ymd.ok()) {
+      return -1;
+    }
+    return static_cast<long long>(
+               std::chrono::sys_days{ymd}.time_since_epoch().count()) *
+               86400LL +
+           h * 3600LL + mi * 60LL + sec;
+  };
+  const long long a = secs(w.first);
+  const long long b = secs(w.second);
+  REQUIRE(a >= 0);
+  REQUIRE(b - a == 86400);
+  // The window starts at the day's local midnight (with a tz database;
+  // the no-tzdb fallback is the plain UTC midnight).
+  const auto* zone = [] -> const std::chrono::time_zone* {
+    try {
+      return std::chrono::current_zone();
+    } catch (const std::exception&) {
+      return nullptr;
+    }
+  }();
+  if (zone) {
+    const auto lt =
+        zone->to_local(std::chrono::sys_seconds{std::chrono::seconds{a}});
+    const auto day = std::chrono::floor<std::chrono::days>(lt);
+    REQUIRE(std::chrono::year_month_day{std::chrono::local_days{day}} ==
+            std::chrono::year{2026} / 9 / 12);
+    const auto tod = std::chrono::hh_mm_ss{lt - day};
+    REQUIRE(tod.hours().count() == 0);
+    REQUIRE(tod.minutes().count() == 0);
+    REQUIRE(tod.seconds().count() == 0);
+  } else {
+    REQUIRE(w.first == "2026-09-12T00:00:00Z");
+    REQUIRE(w.second == "2026-09-13T00:00:00Z");
+  }
 }
 
 TEST_CASE("maybe_load_more appends the next page near the bottom",
