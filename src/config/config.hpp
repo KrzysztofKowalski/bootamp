@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <cctype>
 #include <expected>
 #include <map>
 #include <memory>
@@ -75,8 +76,16 @@ struct YouTubeMusicConfig {
   bool is_set_or_fallback(/*fallback_fn*/ std::string_view fb_id,
                           std::string_view fb_secret) const {
     if (disabled) return false;
-    if (enabled || !cookies_from.empty()) return true;
-    return !fb_id.empty() && !fb_secret.empty();
+    const auto has_non_space = [](std::string_view s) {
+      for (const char c : s)
+        if (!std::isspace(static_cast<unsigned char>(c))) return true;
+      return false;
+    };
+    // Go: Enabled || strings.TrimSpace(CookiesFrom) != "" — whitespace-only
+    // counts as unset.
+    if (enabled || has_non_space(cookies_from)) return true;
+    // Even without a config section, enable if fallback credentials exist.
+    return has_non_space(fb_id) && has_non_space(fb_secret);
   }
 };
 
@@ -147,12 +156,12 @@ struct AudiobookshelfConfig {
 // YouTubeMusic.CookiesFrom, SoundCloud.CookiesFrom.
 struct Config {
   // Audio controls
-  double                 volume            = 0.0;    // dB, clamped [VolumeMin, +24]
+  double                 volume            = 0.0;    // dB, clamped [VolumeMin, +6]
   double                 volume_min        = -50.0;  // dB floor [-90, 0]
   bool                   vis_volume_linked = true;
   std::array<double, 10> eq                = {};
   std::string            eq_preset;
-  std::string            repeat;                      // "off"/"all"/"one"
+  std::string            repeat            = "off";   // "off"/"all"/"one"
   bool                   shuffle           = false;
   bool                   mono              = false;
   double                 speed             = 1.0;    // 0.25-2.0

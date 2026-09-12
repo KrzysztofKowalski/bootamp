@@ -388,9 +388,9 @@ TEST_CASE("decode_with_ext on a generated WAV (libsndfile)", "[Pipeline]") {
   std::vector<Frame> buf(44100);
   auto [n, more] = dec->stream(buf);
   CHECK(n == 44100);
-  CHECK_FALSE(more);  // exactly one second consumed in one pull? sndfile may
-  // return fewer frames per call if read returns short — accept n == len here
-  // but tolerate the invariant: n > 0.
+  // more == (n == want) per the streamer contract: a fully-served buffer
+  // reports more=true even when the source hits EOF inside this pull — the
+  // next stream() call reports (0, false).
 
   // The stream contract allows short reads, so collect everything.
   std::size_t total = n;

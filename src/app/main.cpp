@@ -184,6 +184,15 @@ public:
   // then cleared.
   foundation::ResumeState resume;
 
+  // echelon_end resolves an armed Giereś Echelon chain at natural
+  // end-of-playback (the user's spec: a finished segment rolls to the next
+  // one, a day boundary fetches the next day's first segment, and today's
+  // last segment gets ONE refresh — nothing new stops the chain). Set by
+  // main once the archive model exists; the watchdog's drained branch
+  // consults it before the normal replay/stop path. Null = no chain.
+  std::function<ui::screens::GieresModel::EchelonEnd(
+      const std::string& ended_path, playlist::Track* out)> echelon_end;
+
   // pending_seek_pct_ holds the armed Nj seek digit (Go m.jumpPercent):
   // -1 = none; a digit 0-9 sets it (the status ring shows "Nj → N0%") and
   // 'j' executes the jump to duration*pct/10.
@@ -415,16 +424,16 @@ public:
   // is_playing mirrors the engine flag (the 'x' remove-current path).
   bool is_playing() const { return engine_.is_playing(); }
 
-  // volume_step nudges the volume by `db`, clamped to [volume_min, +24] like
-  // Go's volume stepping.
+  // volume_step nudges the volume by `db`, clamped to [volume_min, +6] like
+  // Go's volume stepping (Player.SetVolume).
   void volume_step(double db) {
     const double min = engine_.volume_min();
     double next = engine_.volume() + db;
     if (next < min) {
       next = min;
     }
-    if (next > 24.0) {
-      next = 24.0;
+    if (next > 6.0) {
+      next = 6.0;
     }
     engine_.set_volume(next);
   }
@@ -457,7 +466,33 @@ public:
       return;
     }
     if (engine_.drained() && !engine_.has_preload() &&
-        !preloading_.load()) {
+        !preloading_.load() && !buffering()) {
+      // An armed Giereś Echelon chain owns this end: the timeline rolls to
+      // the next segment (a day boundary fetches the next day's first; at
+      // the live edge one refresh decides play-or-stop — the model plays
+      // async resolutions itself). Inactive/Stopped fall through. The
+      // buffering gate matters: after the chain's play_track the drained
+      // flag lags the pipeline install (the build runs on the play worker),
+      // and a resolve re-entry there would run away through the timeline.
+      foundation::applog::info("watchdog: playback drained, chain consult");
+      if (echelon_end) {
+        playlist::Track chain_next;
+        const auto [cur, cur_idx] = pl_.current();
+        const auto chain_res = echelon_end(cur.path, &chain_next);
+        if (chain_res == ui::screens::GieresModel::EchelonEnd::Track) {
+          // The successor rides the playlist like the enter path (add +
+          // set_index + play): current() must point at it, or the NEXT
+          // resolve's identity check fails and the chain dies after one hop.
+          const int idx = pl_.len();
+          pl_.add({chain_next});
+          pl_.set_index(idx);
+          play_track(chain_next);
+          return;
+        }
+        if (chain_res == ui::screens::GieresModel::EchelonEnd::Async) {
+          return;  // resolving — the watchdog re-enters on the next tick
+        }
+      }
       // The current track ended with nothing queued (repeat off, or a failed
       // preload): replay-next (Go DrainedMsg -> nextTrack). At the very end
       // this stops playback.
@@ -1929,6 +1964,14 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
     pl.add(ts);
   };
   gieres_model.set_actions(std::move(gieres_actions));
+  // The Echelon auto-continue chain: the watchdog's end-of-playback path
+  // asks the archive model to roll the timeline (next segment / next day /
+  // live-edge refresh-then-stop).
+  ctl.echelon_end = [&gieres_model](
+                        const std::string& ended_path,
+                        playlist::Track* out) {
+    return gieres_model.echelon_resolve_end(ended_path, out);
+  };
 
   bool browse_local = false;
   ScreenRefs screen_refs{ui_mode,      queue_model, browse_model,

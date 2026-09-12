@@ -227,13 +227,12 @@ int add_fd_action(posix_spawn_file_actions_t& fa, int src, int dst, int oflag) {
     }
     return posix_spawn_file_actions_addclose(&fa, src);
   }
-  const int dn = ::open("/dev/null", oflag | O_CLOEXEC);
-  if (dn < 0) {
-    return errno;
-  }
-  const int e = posix_spawn_file_actions_adddup2(&fa, dn, dst);
-  ::close(dn);
-  return e;
+  // The CHILD opens /dev/null itself (Go os/exec for a nil Stdin/Stderr):
+  // opening it here and closing it before the spawn leaves the queued dup2
+  // pointing at a closed fd, and dup2 fails with EBADF — which fails the
+  // WHOLE posix_spawnp (POSIX: a failed file action aborts the spawn). The
+  // fd must also survive execve, so no O_CLOEXEC.
+  return posix_spawn_file_actions_addopen(&fa, dst, "/dev/null", oflag, 0);
 }
 
 // spawn_with_fds runs prog (PATH search like exec.Command) with the given

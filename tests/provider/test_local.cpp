@@ -77,10 +77,16 @@ void make_audio_tree(const fs::path& dir) {
   write_audio_file(dir / "sub" / "c.ogg");
 }
 
-// write_playlist writes a raw playlist file (Go fixtures).
+// write_playlist writes a raw playlist file (Go fixtures). A name that
+// already ends in .toml is written verbatim, so the non-toml-entries fixture
+// can plant a stray "ignored.txt" that Playlists() must skip.
 void write_playlist(const fs::path& dir, std::string_view name, std::string_view content) {
   fs::create_directories(dir);
-  std::ofstream out(dir / (std::string(name) + ".toml"), std::ios::binary);
+  std::string fname(name);
+  if (fname.size() < 5 || fname.compare(fname.size() - 5, 5, ".toml") != 0) {
+    fname += ".toml";
+  }
+  std::ofstream out(dir / fname, std::ios::binary);
   out << content;
 }
 
@@ -582,7 +588,7 @@ TEST_CASE("removeTrack removes by index and keeps empty playlists", "[local][rem
 
   CHECK_FALSE(env.p->remove_track("rem", 5).has_value());  // out of range
 
-  REQUIRE(env.p->remove_track("rem", 1).has_value());
+  REQUIRE(env.p->remove_track("rem", 0).has_value());
   const auto last = env.p->tracks("rem");
   REQUIRE(last.has_value());
   CHECK(last->empty());

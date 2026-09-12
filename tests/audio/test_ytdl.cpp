@@ -100,15 +100,17 @@ constexpr const char* kFakeEnv[] = {
     "FFMPEG_SEEK_SLEEP",
 };
 
-// Fake yt-dlp: records argv + pid, then branches:
+// Fake yt-dlp: records the full command line + pid, then branches:
 //   1. YTDLP_STDERR set   → echo it, exit YTDLP_EXIT (default 1) — nothing
 //      on stdout (a dead pipe → decode_ytdlp_pipe empty-EOF path).
 //   2. argv contains --print → probe invocation: print YTDLP_PROBE_OUTPUT,
 //      exit 0, WITHOUT recording a pid (the engine's concurrent duration
 //      probe must not pollute the pid file).
 //   3. else → record pid, then YTDLP_INFINITE ? endless zeros : 4096 bytes.
+// POSIX "$*" excludes argv[0], so the program name is prepended to record
+// the command line exactly as the tests' expectations spell it out.
 constexpr const char* kFakeYtdlp = R"(#!/bin/sh
-echo "$*" >> "$YTDLP_ARGV_FILE"
+echo "yt-dlp $*" >> "$YTDLP_ARGV_FILE"
 if [ -n "$YTDLP_STDERR" ]; then
   echo "$YTDLP_STDERR" >&2
   exit "${YTDLP_EXIT:-1}"
@@ -139,7 +141,7 @@ exit 0
 //      yt-dlp's — yt-dlp has no idea it is being seeked).
 //   3. else → cat stdin to stdout (the PCM path), exit 0.
 constexpr const char* kFakeFfmpeg = R"(#!/bin/sh
-echo "$*" >> "$FFMPEG_ARGV_FILE"
+echo "ffmpeg $*" >> "$FFMPEG_ARGV_FILE"
 if [ -n "$FFMPEG_STDERR" ]; then
   echo "$FFMPEG_STDERR" >&2
   exit "${FFMPEG_EXIT:-1}"
@@ -401,7 +403,9 @@ TEST_CASE("ytdl probe_ytdlp_duration parses --print duration output", "[ytdl]") 
   set_env("YTDLP_PROBE_OUTPUT", "99");
   CHECK(probe_ytdlp_duration(url).count() == Catch::Approx(99.0));
   set_ytdl_cookies_from("");
-  CHECK(read_lines(ft.file("ytdlp.argv")).back() ==
+  const std::vector<std::string> probe_argv = read_lines(ft.file("ytdlp.argv"));
+  REQUIRE_FALSE(probe_argv.empty());  // .back() on an empty vector is UB
+  CHECK(probe_argv.back() ==
         "yt-dlp --skip-download --no-playlist --socket-timeout 10 --print "
         "duration --cookies-from-browser chrome " + url);
 

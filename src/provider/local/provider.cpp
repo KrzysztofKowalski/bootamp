@@ -241,7 +241,7 @@ std::string expand_path(std::string_view p) {
     const bool special = n == '*' || n == '#' || n == '$' || n == '@' || n == '!' ||
                          n == '?' || (n >= '0' && n <= '9');
     const bool alnum = (n >= 'a' && n <= 'z') || (n >= 'A' && n <= 'Z') ||
-                       (n >= '0' && n <= '9');
+                       (n >= '0' && n <= '9') || n == '_';
     if (!special && !alnum) {
       out += std::string(p.substr(i));  // remainder verbatim (Go early return)
       break;
@@ -252,9 +252,12 @@ std::string expand_path(std::string_view p) {
       out += v ? v : "";
       i += 2;
     } else {
+      // Shell-identifier charset: [A-Za-z0-9_]+ (os.ExpandEnv via
+      // getShellName) — without the underscore $BOOTAMP_TEST_DIR parsed as
+      // $BOOTAMP and the rest leaked through verbatim.
       std::size_t k = i + 1;
       while (k < p.size() && ((p[k] >= 'a' && p[k] <= 'z') || (p[k] >= 'A' && p[k] <= 'Z') ||
-                              (p[k] >= '0' && p[k] <= '9')))
+                              (p[k] >= '0' && p[k] <= '9') || p[k] == '_'))
         ++k;
       const std::string name(p.substr(i + 1, k - i - 1));
       const char* v = std::getenv(name.c_str());
@@ -267,8 +270,10 @@ std::string expand_path(std::string_view p) {
   if (out == "~" || out.rfind("~/", 0) == 0) {
     const char* home = std::getenv("HOME");
     if (home != nullptr && home[0] != '\0') {
-      const std::string trimmed = out == "~" ? "" : std::string(out.substr(2));
-      return (fs::path(home) / trimmed).lexically_normal().string();
+      if (out == "~") {
+        return std::string(home);  // bare ~ → home verbatim (no trailing slash)
+      }
+      return (fs::path(home) / std::string(out.substr(2))).lexically_normal().string();
     }
   }
   return out;
@@ -579,6 +584,11 @@ std::vector<playlist::Track> tracks_from_paths(const std::vector<std::string>& f
       }
     });
   }
+  // Join before returning: the return value is materialized (moved out of
+  // `tracks`) before the pool's destructor runs, and the workers still hold
+  // references to it at that point — a worker could write into the moved-from
+  // vector. (Joining here makes the move safe regardless of NRVO.)
+  for (auto& t : pool) t.join();
   return tracks;
 }
 
@@ -1002,6 +1012,11 @@ std::expected<void, std::string> Provider::delete_playlist(std::string_view name
   auto path = safe_path(name);
   if (!path) return std::unexpected(path.error());
   std::error_code ec;
+  // Go os.Remove errors on a missing file (ENOENT) — fs::remove would
+  // quietly succeed there.
+  if (!fs::exists(*path, ec)) {
+    return std::unexpected("remove " + path->string() + ": no such file or directory");
+  }
   fs::remove(*path, ec);
   if (ec) {
     return std::unexpected("remove " + path->string() + ": " + ec.message());

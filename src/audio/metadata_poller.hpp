@@ -38,10 +38,14 @@ private:
 
   SourceRef                                  source_;
   Callback                                   cb_;
-  std::jthread                               thread_;
+  // thread_ declares LAST on purpose: member destruction runs in reverse,
+  // so the jthread dtor (request_stop + join) fires while cond_/mu_/wake_
+  // are still alive. The earlier order (thread_ first) destroyed the cv and
+  // mutex BEFORE joining, leaving the parked loop waiting on dead objects.
   std::condition_variable_any                cond_;
   std::mutex                                 mu_;
   std::atomic<bool>                          wake_{false};
+  std::jthread                               thread_;
 };
 
 }  // namespace bootamp::audio

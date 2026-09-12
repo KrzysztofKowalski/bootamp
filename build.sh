@@ -2,7 +2,11 @@
 # build.sh — bootamp build (C++23 + SIMD, no -ffast-math).
 #
 # Installs missing deps (pacman + AUR), configures and builds.
-# Usage: ./build.sh [--tsan] [--debug] [--clean]
+# Usage: ./build.sh [--tsan] [--asan] [--debug] [--clean]
+#
+# --asan builds into build-asan (address sanitizer + symbols) — the triage
+# tool for heap smashes: ./build-asan/test_audio points straight at the
+# overflowing file:line.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -37,11 +41,16 @@ fi
 
 # --- 2. Configure + build ---------------------------------------------------
 BUILD_DIR=build
+SANITIZER_FLAGS="-fsanitize=address -g -fno-omit-frame-pointer"
 CMAKE_ARGS=(-DCMAKE_BUILD_TYPE=Release)
 for arg in "$@"; do
   case "$arg" in
     --tsan)  CMAKE_ARGS+=(-DBOOTAMP_ENABLE_TSAN=ON) ;;
     --debug) CMAKE_ARGS+=(-DCMAKE_BUILD_TYPE=Debug) ;;
+    --asan)  BUILD_DIR=build-asan; CMAKE_ARGS+=(
+               -DCMAKE_C_FLAGS="$SANITIZER_FLAGS"
+               -DCMAKE_CXX_FLAGS="$SANITIZER_FLAGS"
+               -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address") ;;
     --clean) rm -rf "$BUILD_DIR" ;;
     *) echo "unknown flag: $arg" >&2; exit 1 ;;
   esac

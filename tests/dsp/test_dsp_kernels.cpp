@@ -400,7 +400,7 @@ TEST_CASE("sample_band_linear interpolates and clamps at the endpoints",
   CHECK(bdsp::sample_band_linear(bands, 0.0) == Approx(1.0).margin(1e-9));
   CHECK(bdsp::sample_band_linear(bands, 2.0) == Approx(5.0).margin(1e-9));
   CHECK(bdsp::sample_band_linear(bands, 0.5) == Approx(2.0).margin(1e-9));
-  CHECK(bdsp::sample_band_linear(bands, 1.25) == Approx(4.0).margin(1e-9));
+  CHECK(bdsp::sample_band_linear(bands, 1.25) == Approx(3.5).margin(1e-9));
   CHECK(bdsp::sample_band_linear(bands, -1.0) == Approx(1.0).margin(1e-9));  // clamped
   CHECK(bdsp::sample_band_linear(bands, 9.0) == Approx(5.0).margin(1e-9));   // clamped
   CHECK(bdsp::sample_band_linear({}, 1.0) == 0.0);
@@ -581,7 +581,7 @@ TEST_CASE("FftPlan::make rejects odd and tiny sizes", "[dsp][fft]") {
   REQUIRE(small != nullptr);
   CHECK(small->size() == 2);
   CHECK(small->input().size() == 2);
-  CHECK(small->output().size() == 3);  // n/2 + 1
+  CHECK(small->output().size() == 2);  // n/2 + 1
 }
 
 TEST_CASE("r2c of an impulse is flat across every bin", "[dsp][fft]") {

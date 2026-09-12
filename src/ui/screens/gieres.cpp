@@ -5,6 +5,8 @@
 // key, the host routes them into the model.
 #include "ui/screens/gieres.hpp"
 
+#include "foundation/applog.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -226,6 +228,10 @@ GieresModel::~GieresModel() {
   if (dates_thread_.joinable()) {
     dates_thread_.request_stop();
     dates_thread_.join();
+  }
+  if (chain_thread_.joinable()) {
+    chain_thread_.request_stop();
+    chain_thread_.join();
   }
 }
 
@@ -627,12 +633,16 @@ void GieresModel::fetch_dates() {
   key->query     = "";
   key->sort      = "date";
   key->for_dates = true;
+  // Snapshot the discovered timeline start (set by the first calendar): a
+  // reload skips the ~17-probe bisection burst entirely — one anchor probe
+  // less matters to a small Rails server serving ffmpeg's seeks too.
+  const std::string known_first = calendar_first_;
   status_ = "loading timeline days…";
   if (dates_thread_.joinable()) {
     dates_thread_.request_stop();
     dates_thread_.join();
   }
-  dates_thread_ = std::jthread([this, key](std::stop_token stoken) {
+  dates_thread_ = std::jthread([this, key, known_first](std::stop_token stoken) {
     if (stoken.stop_requested()) {
       return;
     }
@@ -664,10 +674,20 @@ void GieresModel::fetch_dates() {
       result->fetch_error = std::move(err);
       dates_inbox_.store(std::move(result), std::memory_order_release);
     };
+    std::chrono::sys_days hi{today_date()};
+    if (!known_first.empty()) {
+      // The cached timeline start from an earlier calendar load — skip the
+      // probe burst (the bisection's ~17 connections) entirely; a backfilled
+      // earlier start is picked up on the next full reload... the cache is
+      // only cleared when the probes are, i.e. never within a session.
+      const auto ymd = parse_ymd(known_first);
+      if (ymd.ok()) {
+        hi = std::chrono::sys_days{ymd};
+      }
+    } else {
     // Anchor the search top (hi must be covered): usually today's first hour
     // has segments; a server hiccup right now walks a few days back instead
     // of failing the whole calendar.
-    std::chrono::sys_days hi{today_date()};
     auto anchor = covered(hi);
     for (int back = 0; back < 7; ++back) {
       if (!anchor) {
@@ -741,6 +761,7 @@ void GieresModel::fetch_dates() {
         }
       }
     }
+    }  // the probe path (skipped when the timeline start is cached)
     // The calendar: every day from the first covered day through today —
     // gap days included (the day window fetch reports them as empty).
     std::vector<std::string> days;
@@ -775,6 +796,9 @@ void GieresModel::pump() {
     dates_loading_.store(false, std::memory_order_release);
     if (dates->ok) {
       ech_dates_list_ = std::move(dates->ech_dates);
+      if (!ech_dates_list_.empty()) {
+        calendar_first_ = ech_dates_list_.front();
+      }
       status_.clear();
       // Land the index cursor on the shown day (today at first open) — the
       // calendar's newest row is the useful one, the oldest is scroll-far.
@@ -1105,6 +1129,172 @@ int GieresModel::ech_index_row(const std::string& date) const {
   return static_cast<int>(ech_dates_list_.size()) - 1;
 }
 
+// next_day is the calendar day after `date` ("" on a malformed date).
+std::string GieresModel::next_day(const std::string& date) const {
+  const auto ymd = parse_ymd(date);
+  if (!ymd.ok()) {
+    return "";
+  }
+  return date_string(std::chrono::year_month_day{
+      std::chrono::sys_days{ymd} + std::chrono::days{1}});
+}
+
+// spawn_chain_fetch fetches `date`'s segment window for the auto-continue
+// chain (the next day's segments, or today's window at the live edge) on
+// its own thread + mailbox — the dates-fetch pattern: it must never clobber
+// (or wait on) a view fetch, and echelon_resolve_end (the host's watchdog
+// thread) drains it. Single-flight via chain_loading_; the CAS succeeded
+// means the previous result was consumed, so the respawn join is instant.
+void GieresModel::spawn_chain_fetch(std::string date) {
+  bool expected = false;
+  if (!chain_loading_.compare_exchange_strong(expected, true)) {
+    return;  // a successor fetch is already in flight
+  }
+  auto key = std::make_shared<FetchResult>();
+  key->view      = View::Echelon;
+  key->org       = OrgView::List;
+  key->page      = 1;
+  key->query     = "";
+  key->sort      = "date";
+  key->date      = std::move(date);
+  key->for_chain = true;
+  key->chain_gen = chain_gen_;
+  if (chain_thread_.joinable()) {
+    chain_thread_.request_stop();
+    chain_thread_.join();
+  }
+  chain_thread_ = std::jthread([this, key](std::stop_token stoken) {
+    if (stoken.stop_requested()) {
+      return;
+    }
+    auto result = std::make_shared<FetchResult>(*key);
+    const auto window = gieres_day_window(key->date);
+    if (window.first.empty()) {
+      result->fetch_error = "gieres: bad chain day " + key->date;
+    } else {
+      auto segs = segments_fn_(window.first, window.second);
+      if (segs) {
+        result->ok       = true;
+        result->segments = std::move(*segs);
+      } else {
+        result->fetch_error = std::move(segs).error();
+      }
+    }
+    chain_inbox_.store(std::move(result), std::memory_order_release);
+  });
+}
+
+// echelon_resolve_end — see gieres.hpp. The host's watchdog calls this every
+// tick while the engine is drained: the same-day successor resolves
+// immediately; a day boundary and the live edge spawn a chain fetch whose
+// result the NEXT resolve consumes (that is why the drain lives here, on
+// the watchdog thread, and not in pump()).
+GieresModel::EchelonEnd GieresModel::echelon_resolve_end(
+    const std::string_view ended_path, playlist::Track* out) {
+  std::lock_guard lk(chain_mu_);
+  if (!chain_active_ || ended_path != chain_track_) {
+    foundation::applog::info(
+        "echelon chain: inactive (armed={} track='{}' ended='{}')",
+        chain_active_, chain_track_, ended_path);
+    return EchelonEnd::Inactive;  // not ours — the normal end path applies
+  }
+  // A landed successor fetch first (the watchdog re-enters until the chain
+  // resolves, so this is where the async resolution completes).
+  if (const auto chain =
+          chain_inbox_.exchange(nullptr, std::memory_order_acquire)) {
+    chain_loading_.store(false, std::memory_order_release);
+    if (chain->chain_gen != chain_gen_) {
+      // A stale result from an earlier arm — drop it; the current chain's
+      // successor need re-derives below.
+    } else if (!chain->ok) {
+      // Transport failure: the network is gone, stop rolling (the user's
+      // playback stopped anyway; the screen surfaces errors on its own
+      // fetches).
+      chain_active_ = false;
+      foundation::applog::info("echelon chain: stopped (fetch error: {})",
+                               chain->fetch_error);
+      return EchelonEnd::Stopped;
+    } else {
+      // The first segment strictly after the one that just finished — a
+      // next-day fetch's first segment qualifies by construction; today's
+      // live-edge refresh skips the already-played prefix of the day.
+      if (chain_index_ < 0 ||
+          static_cast<std::size_t>(chain_index_) >= chain_segments_.size()) {
+        chain_active_ = false;  // corrupt chain state — do not roll
+        return EchelonEnd::Stopped;
+      }
+      const GieresSegment& last =
+          chain_segments_[static_cast<std::size_t>(chain_index_)];
+      std::size_t pick = chain->segments.size();
+      for (std::size_t i = 0; i < chain->segments.size(); ++i) {
+        if (!chain->segments[i].url.empty() &&
+            chain->segments[i].aired_at > last.aired_at) {
+          pick = i;
+          break;
+        }
+      }
+      if (pick < chain->segments.size()) {
+        if (active_base_) {
+          const auto base = active_base_->get();  // mutex'd; watchdog-safe
+          if (!base.empty()) {
+            chain_base_ = base;
+          }
+        }
+        *out = archive_track(chain_base_, chain->segments[pick].url,
+                             chain->segments[pick].title,
+                             chain->segments[pick].duration);
+        chain_segments_ = chain->segments;
+        chain_day_      = chain->date;
+        chain_index_    = static_cast<int>(pick);
+        chain_track_    = out->path;
+        foundation::applog::info("echelon chain: roll -> {}", out->path);
+        return EchelonEnd::Track;
+      }
+      // The fetched day is dark relative to the chain (a gap day) — skip
+      // forward; past today the chain is done.
+      const std::string advance = next_day(chain->date);
+      if (advance.empty() || advance > date_string(today_date())) {
+        chain_active_ = false;
+        foundation::applog::info("echelon chain: stopped (dark day at edge)");
+        return EchelonEnd::Stopped;
+      }
+      spawn_chain_fetch(advance);
+      return EchelonEnd::Async;
+    }
+  }
+  if (chain_loading_.load(std::memory_order_acquire)) {
+    return EchelonEnd::Async;  // a successor fetch is still in flight
+  }
+  // The same day's next segment resolves immediately — the chain holds the
+  // day's segments, no fetch involved (dark, URL-less slices are skipped).
+  int next = chain_index_ + 1;
+  while (next < static_cast<int>(chain_segments_.size()) &&
+         chain_segments_[static_cast<std::size_t>(next)].url.empty()) {
+    ++next;
+  }
+  if (next < static_cast<int>(chain_segments_.size())) {
+    const GieresSegment& next_seg = chain_segments_[static_cast<std::size_t>(next)];
+    *out = archive_track(chain_base_, next_seg.url, next_seg.title,
+                         next_seg.duration);
+    chain_index_ = next;
+    chain_track_ = out->path;
+    foundation::applog::info("echelon chain: roll -> {}", out->path);
+    return EchelonEnd::Track;
+  }
+  // The day's own segments rolled over: the successor needs a fetch — the
+  // next day's window, or (at the live edge) one refresh of today's.
+  const std::string advance = next_day(chain_day_);
+  if (advance.empty() || advance > date_string(today_date())) {
+    foundation::applog::info("echelon chain: live edge, refreshing {}",
+                             chain_day_);
+    spawn_chain_fetch(chain_day_);  // the live edge: one refresh decides
+    return EchelonEnd::Async;
+  }
+  foundation::applog::info("echelon chain: day end, fetching {}", advance);
+  spawn_chain_fetch(advance);
+  return EchelonEnd::Async;
+}
+
 void GieresModel::play_cursor() {
   switch (view_) {
     case View::Live:
@@ -1162,8 +1352,24 @@ void GieresModel::play_cursor() {
       }
       // Finite URL tracks are seekable by restart (ffmpeg -ss over HTTP
       // Range), so left/right winds inside the segment like any track.
-      actions_.on_play_track(
-          archive_track(base_url_, seg.url, seg.title, seg.duration));
+      // Arming the auto-continue chain: the day's segments ride along so
+      // echelon_resolve_end rolls to the next segment (and the next day's
+      // first) when this one finishes naturally.
+      playlist::Track track =
+          archive_track(base_url_, seg.url, seg.title, seg.duration);
+      {
+        std::lock_guard lk(chain_mu_);
+        chain_active_   = true;
+        chain_track_    = track.path;
+        chain_day_      = ech_date_;
+        chain_base_     = base_url_;
+        chain_segments_ = segments_;
+        chain_index_    = pos.first;
+        ++chain_gen_;
+        foundation::applog::info("echelon chain armed: day={} idx={} track={}",
+                                 chain_day_, chain_index_, chain_track_);
+      }
+      actions_.on_play_track(track);
       return;
     }
   }

@@ -258,6 +258,8 @@ TEST_CASE("resolve_ytdl builds the exact yt-dlp argument list", "[resolve][ytdl]
   const fs::path fake = tmp / "yt-dlp";
   {
     std::ofstream out(fake);
+    // "$@" excludes argv[0]: the command name (Go exec.Command puts "yt-dlp"
+    // in Args[0], which is the child's $0) is never part of the echoed args.
     out << "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" << log.string() << "'\n";
   }
   chmod(fake.c_str(), 0755);
@@ -276,7 +278,6 @@ TEST_CASE("resolve_ytdl builds the exact yt-dlp argument list", "[resolve][ytdl]
   REQUIRE(r1.has_value());
   REQUIRE(r1->empty());  // the arg echo is not JSON → zero tracks, no error
   CHECK(read_file(log) ==
-        "yt-dlp\n"
         "--flat-playlist\n"
         "-j\n"
         "--socket-timeout\n"
@@ -292,7 +293,6 @@ TEST_CASE("resolve_ytdl builds the exact yt-dlp argument list", "[resolve][ytdl]
   const auto r2 = bootamp::resolve::resolve_ytdl_with_bounds("https://example.com/playlist", 0, 0);
   REQUIRE(r2.has_value());
   CHECK(read_file(log) ==
-        "yt-dlp\n"
         "--flat-playlist\n"
         "-j\n"
         "--socket-timeout\n"
@@ -306,7 +306,6 @@ TEST_CASE("resolve_ytdl builds the exact yt-dlp argument list", "[resolve][ytdl]
   const auto r3 = bootamp::resolve::resolve_ytdl_with_bounds("https://example.com/playlist", 0, 1);
   REQUIRE(r3.has_value());
   CHECK(read_file(log) ==
-        "yt-dlp\n"
         "--flat-playlist\n"
         "-j\n"
         "--socket-timeout\n"
@@ -322,7 +321,6 @@ TEST_CASE("resolve_ytdl builds the exact yt-dlp argument list", "[resolve][ytdl]
   const auto r4 = bootamp::resolve::resolve_ytdl("https://example.com/playlist");
   REQUIRE(r4.has_value());
   CHECK(read_file(log) ==
-        "yt-dlp\n"
         "--flat-playlist\n"
         "-j\n"
         "--socket-timeout\n"

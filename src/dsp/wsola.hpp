@@ -130,8 +130,10 @@ class WsolaStretcher {
  public:
   explicit WsolaStretcher(Source& src, const std::atomic<double>* speed)
       : src_(src), speed_(speed) {
-    in_.resize(static_cast<std::size_t>(kInitialInFrames));   // cliamp: make([][2]float64, 16384)
-    out_.resize(static_cast<std::size_t>(kInitialOutFrames)); // cliamp: make([][2]float64, 8192)
+    // cliamp: make([][2]float64, 16384/8192) — FRAMES (2 doubles each); the
+    // vectors below count doubles, so the frame counts double here.
+    in_.resize(static_cast<std::size_t>(2 * kInitialInFrames));
+    out_.resize(static_cast<std::size_t>(2 * kInitialOutFrames));
   }
 
   // stream produces output frames. At speed 1.0x (or <= 0) it passes through
@@ -241,8 +243,11 @@ class WsolaStretcher {
     }
     while (in_n_ < need) {
       const std::ptrdiff_t to_read = std::max<std::ptrdiff_t>(need - in_n_, 4096);
-      if (in_n_ + to_read > static_cast<std::ptrdiff_t>(in_.size())) {
-        in_.resize(static_cast<std::size_t>(in_n_ + to_read));
+      // in_ counts DOUBLES (2 per frame) — the capacity check must be in
+      // doubles too, or writes past the buffer corrupt the heap (the old
+      // frames-vs-doubles compare resized half a buffer too late).
+      if (2 * (in_n_ + to_read) > static_cast<std::ptrdiff_t>(in_.size())) {
+        in_.resize(static_cast<std::size_t>(2 * (in_n_ + to_read)));
       }
       chunk_.resize(static_cast<std::size_t>(to_read));
       const auto [n, ok] = src_.stream(
@@ -292,9 +297,12 @@ class WsolaStretcher {
       return false;
     }
 
-    // Grow the output ring if needed (cliamp: grow to outWr+tsSeq+4096).
-    if (out_wr_ + static_cast<std::ptrdiff_t>(kTsSeq) > static_cast<std::ptrdiff_t>(out_.size())) {
-      out_.resize(static_cast<std::size_t>(out_wr_ + static_cast<std::ptrdiff_t>(kTsSeq) + 4096));
+    // Grow the output ring if needed (cliamp: grow to outWr+tsSeq+4096
+    // FRAMES; out_ counts doubles).
+    if (2 * (out_wr_ + static_cast<std::ptrdiff_t>(kTsSeq)) >
+        static_cast<std::ptrdiff_t>(out_.size())) {
+      out_.resize(static_cast<std::size_t>(
+          2 * (out_wr_ + static_cast<std::ptrdiff_t>(kTsSeq) + 4096)));
     }
 
     if (first) {

@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <poll.h>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -354,13 +355,28 @@ std::string FfmpegPipe::wait_for_audio_bytes(std::size_t n,
   std::mutex mu;
   std::condition_variable cv;
 
-  std::jthread peek([&](std::stop_token) {
+  // The peek's reads are bounded by the caller's deadline: close()ing
+  // stdout_fd from another thread does not unblock an in-flight read(2) on
+  // Linux, so a plain blocking read here would hang the timeout path (the
+  // jthread join waits on this thread) and stall the whole stream teardown.
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::jthread peek([&](std::stop_token stoken) {
     // bufio.Peek(n) analog: serve from the buffer first, then block in read
     // until n bytes total are available or EOF/error.
     const std::size_t buffered =
         (rpos_ < rbuf_.size()) ? rbuf_.size() - rpos_ : 0;
     const std::size_t served = std::min(n, buffered);
     while (served + got_new < n) {
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline - std::chrono::steady_clock::now());
+      if (remaining.count() <= 0 || stoken.stop_requested()) {
+        break;
+      }
+      struct pollfd pfd {stdout_fd, POLLIN, 0};
+      const int pr = ::poll(&pfd, 1, static_cast<int>(remaining.count()));
+      if (pr <= 0) {
+        break;  // deadline or poll error
+      }
       const ssize_t r = read_eintr(stdout_fd, scratch.data() + got_new,
                                    n - served - got_new);
       if (r <= 0) {
@@ -459,6 +475,10 @@ std::expected<std::unique_ptr<FfmpegPipe>, std::string> start_ffmpeg_pipe(
   std::vector<std::string> argv_storage;
   argv_storage.reserve(16);
   argv_storage.push_back("ffmpeg");
+  // Go parity: exec.Command with a nil Stdin gives the child /dev/null —
+  // without -nostdin an inherited TTY makes ffmpeg poll the terminal for
+  // interactive keys (and eat keystrokes meant for the app).
+  argv_storage.push_back("-nostdin");
   if (start_sec > 0.0) {
     // Input-side demuxer fast seek (cliamp localFFmpegStreamer.startPipe /
     // decodeYTDLPipe): "-ss" BEFORE "-i" seeks in the demuxer, not the
@@ -519,12 +539,12 @@ std::expected<std::unique_ptr<FfmpegPipe>, std::string> start_ffmpeg_pipe(
     posix_spawn_file_actions_adddup2(&fa, stdin_fd, STDIN_FILENO);
     posix_spawn_file_actions_addclose(&fa, stdin_fd);
   } else {
-    // Go: cmd.Stdin = nil wires /dev/null.
-    const int devnull = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
-    if (devnull >= 0) {
-      posix_spawn_file_actions_adddup2(&fa, devnull, STDIN_FILENO);
-      posix_spawn_file_actions_addclose(&fa, devnull);
-    }
+    // Go: cmd.Stdin = nil wires /dev/null. The child opens it itself
+    // (addopen): a parent-open + adddup2 + close-before-spawn queues an
+    // action on a closed fd (EBADF aborts the whole spawn), and keeping the
+    // parent fd leaks one descriptor per nil-stdin spawn.
+    posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null",
+                                     O_RDONLY, 0);
   }
 
   // posix_spawnp searches PATH for "ffmpeg" like exec.Command in Go;

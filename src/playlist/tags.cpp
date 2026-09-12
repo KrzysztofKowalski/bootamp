@@ -691,6 +691,17 @@ std::expected<TagInfo, std::string> read_tags(std::string_view path) {
     return std::unexpected{"unable to read tags from " + p};
   }
 
+  // Go's tag.ReadFrom only recognizes ID3v1/ID3v2, MP4 atoms, FLAC, Ogg and
+  // DSF containers and otherwise fails (filename fallback). TagLib is more
+  // lenient for MPEG: a junk or empty .mp3 still yields a valid FileRef whose
+  // tag() is the auto-created empty ID3v2 tag, so require the MPEG file to
+  // actually carry an ID3 container (Go does not read APE tags either). The
+  // other formats already report unparseable files via FileRef::isNull().
+  if (const auto* mp3 = dynamic_cast<const TagLib::MPEG::File*>(ref.file());
+      mp3 != nullptr && !mp3->hasID3v2Tag() && !mp3->hasID3v1Tag()) {
+    return std::unexpected{"no readable ID3 tags in " + p};
+  }
+
   TagInfo info;
   const TagLib::Tag* tag = ref.tag();
 

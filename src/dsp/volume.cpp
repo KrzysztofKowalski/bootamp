@@ -130,8 +130,8 @@ void apply_mono_avx2(std::span<std::array<float, 2>> frames) {
     __m256 lo = _mm256_unpacklo_ps(s, s);  // [L0,L0,R0,R0, L2,L2,R2,R2]
     __m256 hi = _mm256_unpackhi_ps(s, s);  // [L1,L1,R1,R1, L3,L3,R3,R3]
     // Reorder so all Ls together and all Rs together.
-    __m256 l = _mm256_shuffle_ps(lo, hi, 0x88);  // [L0,L0,L1,L1, L2,L2,L3,L3]
-    __m256 r = _mm256_shuffle_ps(lo, hi, 0xdd);  // [R0,R0,R1,R1, R2,R2,R3,R3]
+    __m256 l = _mm256_shuffle_ps(lo, hi, 0x44);  // [L0,L0,L1,L1, L2,L2,L3,L3]
+    __m256 r = _mm256_shuffle_ps(lo, hi, 0xee);  // [R0,R0,R1,R1, R2,R2,R3,R3]
     __m256 mid = _mm256_mul_ps(_mm256_add_ps(l, r), half);
     _mm256_storeu_ps(o, mid);
   }
@@ -159,8 +159,8 @@ static void apply_volume_mono_avx2(std::span<std::array<float, 2>> frames,
     s = _mm256_mul_ps(s, g);  // apply gain first (matches Go ordering)
     __m256 lo = _mm256_unpacklo_ps(s, s);
     __m256 hi = _mm256_unpackhi_ps(s, s);
-    __m256 l = _mm256_shuffle_ps(lo, hi, 0x88);
-    __m256 r = _mm256_shuffle_ps(lo, hi, 0xdd);
+    __m256 l = _mm256_shuffle_ps(lo, hi, 0x44);
+    __m256 r = _mm256_shuffle_ps(lo, hi, 0xee);
     __m256 mid = _mm256_mul_ps(_mm256_add_ps(l, r), half);
     _mm256_storeu_ps(o, mid);
   }

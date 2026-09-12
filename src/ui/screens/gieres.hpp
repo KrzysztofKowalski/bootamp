@@ -183,6 +183,27 @@ public:
   void pump();
   bool loading() const { return loading_.load(std::memory_order_acquire); }
 
+  // --- Echelon auto-continue chain ---------------------------------------
+  // Playing a segment (enter) arms the chain: when the host's end-of-playback
+  // watchdog sees that segment finish naturally with nothing queued after it,
+  // echelon_resolve_end rolls the timeline forward — the same day's next
+  // segment (resolved immediately), a day boundary (the next day's first
+  // segment, dark days skipped, bounded by today), and at the live edge
+  // (today's last segment) ONE refresh of today's window: a newer segment
+  // plays, otherwise the chain stops. Any other play start leaves the chain
+  // inert (the host verifies the ended track's identity) and the next Echelon
+  // enter re-arms it. Runs on the host's watchdog thread; the model guards
+  // the chain state.
+  enum class EchelonEnd : std::uint8_t {
+    Track,    // *out holds the successor — play it
+    Async,    // resolving through the chain fetch; the model plays via
+              // on_play_track when it lands (the host just holds)
+    Stopped,  // the chain reached the live edge with nothing new — done
+    Inactive  // no chain for this track (the normal end path applies)
+  };
+  EchelonEnd echelon_resolve_end(std::string_view ended_path,
+                                 playlist::Track* out);
+
   // kNearBottom — cursor distance from the list end that triggers a lazy page
   // load (browse.cpp kCatalogNearBottom).
   inline static constexpr int kNearBottom = 10;
@@ -227,6 +248,12 @@ private:
   // ech_index_row is the calendar row of `date` (the newest row when absent —
   // the index toggle lands the cursor there).
   int  ech_index_row(const std::string& date) const;
+  // spawn_chain_fetch fetches `date`'s segment window for the chain (the
+  // next day's segments or today's live-edge refresh) on its own thread +
+  // mailbox; the resolve drains it. Single-flight via chain_loading_.
+  void spawn_chain_fetch(std::string date);
+  // next_day is the calendar day after `date` ("" on a malformed date).
+  std::string next_day(const std::string& date) const;
 
   OrgonityFn   orgonity_fn_;
   ByDateFn     by_date_fn_;
@@ -264,6 +291,10 @@ private:
   int                         expanded_seg_ = -1;
   bool                        ech_dates_ = false;
   std::vector<std::string>    ech_dates_list_;
+  // The timeline start the first calendar load discovered ("" = not yet):
+  // reloads skip the bisection's ~17-probe connection burst and re-emit the
+  // calendar from this anchor straight through today.
+  std::string                 calendar_first_;
 
   // Live view state.
   std::string now_playing_;
@@ -304,6 +335,12 @@ private:
     // another tab (the calendar is view-independent, so a late result is
     // harmless). It rides the dedicated dates_inbox_ mailbox.
     bool for_dates = false;
+    // for_chain=true → the auto-continue chain's successor fetch (a day
+    // window for `date`): it rides the dedicated chain_inbox_ mailbox and is
+    // drained by echelon_resolve_end on the host's watchdog thread, tagged
+    // with the chain generation that requested it.
+    bool for_chain    = false;
+    std::uint64_t chain_gen = 0;
     // Payload (one per fetch kind).
     bool                        ok = false;
     std::string                 fetch_error;
@@ -327,6 +364,23 @@ private:
   std::jthread      dates_thread_;
   std::atomic<bool> dates_loading_{false};
   std::atomic<std::shared_ptr<const FetchResult>> dates_inbox_{nullptr};
+
+  // The auto-continue chain's successor fetch (echelon_resolve_end): the
+  // next day's segments, dark days skipped, and at the live edge one
+  // refresh of today's window. Own thread + mailbox like the dates fetch —
+  // it must never clobber (or wait on) a view fetch, and the watchdog's
+  // resolve drains it (no UI-thread involvement).
+  std::mutex        chain_mu_;
+  bool              chain_active_ = false;  // armed by the last segment enter
+  std::string       chain_track_;    // the playing segment's full path
+  std::string       chain_day_;      // its day ("YYYY-MM-DD")
+  std::string       chain_base_;     // the endpoint base the chain tracks use
+  std::vector<GieresSegment> chain_segments_;  // the chain's day's segments
+  int               chain_index_ = -1;  // the playing segment in chain_segments_
+  std::uint64_t     chain_gen_   = 0;   // bumped on (re)arm — stale results drop
+  std::jthread      chain_thread_;
+  std::atomic<bool> chain_loading_{false};
+  std::atomic<std::shared_ptr<const FetchResult>> chain_inbox_{nullptr};
 
   // for_host's sticky-fallback state (null for test-constructed models):
   // the fetch hooks record the endpoint that answered; pump() adopts it.

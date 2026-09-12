@@ -72,12 +72,15 @@ bool Resampler::configure(int src_rate, int dst_rate, int channels) {
 
 std::size_t Resampler::process(std::span<const float> in,
                                std::span<float> out_dst) {
-  if (ctx_ == nullptr || in.size() < 2 || out_dst.size() < 2) {
+  const std::size_t ch = ch_ > 0 ? static_cast<std::size_t>(ch_) : 2;
+  if (ctx_ == nullptr || in.size() < ch || out_dst.size() < ch) {
     return 0;
   }
-  // Interleaved stereo: 2 floats per frame. Counts are in frames.
-  const std::size_t in_frames  = in.size() / 2;
-  const std::size_t out_frames = out_dst.size() / 2;
+  // Interleaved ch_ channels: ch floats per frame. Counts are in frames
+  // (the hard-coded /2 made a mono configure() undercount every buffer and
+  // desync from the swr context).
+  const std::size_t in_frames  = in.size() / ch;
+  const std::size_t out_frames = out_dst.size() / ch;
 
   uint8_t*       out_ptr = reinterpret_cast<uint8_t*>(out_dst.data());
   const uint8_t* in_ptr  = reinterpret_cast<const uint8_t*>(in.data());
@@ -92,17 +95,18 @@ std::size_t Resampler::process(std::span<const float> in,
 }
 
 std::size_t Resampler::flush(std::span<float> out_dst) {
-  if (ctx_ == nullptr || out_dst.size() < 2) {
+  const std::size_t ch = ch_ > 0 ? static_cast<std::size_t>(ch_) : 2;
+  if (ctx_ == nullptr || out_dst.size() < ch) {
     return 0;
   }
-  const std::size_t cap = out_dst.size() / 2;
+  const std::size_t cap = out_dst.size() / ch;
   std::size_t       total = 0;
   // swr_convert with NULL input and 0 in_count flushes the internal buffer
   // (filter delay tail). Repeat until it reports no more output or the
   // caller's buffer is full.
   while (total < cap) {
     uint8_t* out_ptr =
-        reinterpret_cast<uint8_t*>(out_dst.data() + total * 2);
+        reinterpret_cast<uint8_t*>(out_dst.data() + total * ch);
     const int produced =
         swr_convert(ctx_, &out_ptr, static_cast<int>(cap - total), nullptr, 0);
     if (produced <= 0) {

@@ -127,11 +127,14 @@ std::expected<ytdl_parse_result, std::string> parse_ytdl_tracks(std::string_view
     if (line.size() > kMaxLine) {
       return std::unexpected(std::string("bufio.Scanner: token too long"));
     }
-    line = trim_space(line);
-    if (line.empty()) continue;  // Go: blank lines skipped before counting
+    // Keep the trimmed line by value: `line = trim_space(line)` would bind the
+    // view to the temporary's buffer and leave it dangling once the temporary
+    // dies (long lines then point into freed heap and parse as garbage).
+    const std::string trimmed = trim_space(line);
+    if (trimmed.empty()) continue;  // Go: blank lines skipped before counting
     result.entries++;
     try {
-      const nlohmann::json j = nlohmann::json::parse(line);
+      const nlohmann::json j = nlohmann::json::parse(trimmed);
       std::string track_url = jstr(j, "webpage_url");
       if (track_url.empty()) track_url = jstr(j, "url");
       if (track_url.empty()) continue;

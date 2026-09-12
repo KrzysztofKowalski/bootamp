@@ -231,6 +231,20 @@ public:
     std::size_t written = 0;
     out_buf_.resize(dst.size() * 2);
     while (written < dst.size()) {
+      // Emit buffered output first: swr may over-produce relative to the
+      // room left in dst on the last iteration, and copying produced frames
+      // unchecked overflowed dst (the heap smash behind the segfault).
+      if (out_rd_ < out_wr_) {
+        const std::size_t n = std::min(
+            static_cast<std::size_t>(out_wr_ - out_rd_), dst.size() - written);
+        for (std::size_t i = 0; i < n; ++i) {
+          dst[written + i][0] = out_buf_[2 * (out_rd_ + i)];
+          dst[written + i][1] = out_buf_[2 * (out_rd_ + i) + 1];
+        }
+        written += n;
+        out_rd_ += n;
+        continue;
+      }
       if (in_used_ == 0) {
         auto [n, more] = src_->stream(staging_);
         if (n == 0) {
@@ -249,23 +263,20 @@ public:
       std::size_t produced = resampler_.process(
           std::span<const float>(in_buf_.data(), in_used_), out_buf_);
       in_used_ = 0;  // process() consumed the input given
-      if (produced > 0) {
-        for (std::size_t i = 0; i < produced; ++i) {
-          dst[written + i][0] = out_buf_[2 * i];
-          dst[written + i][1] = out_buf_[2 * i + 1];
-        }
-        written += produced;
-      } else if (eof_) {
+      out_rd_ = 0;
+      out_wr_ = static_cast<std::ptrdiff_t>(produced);
+      if (produced == 0 && eof_) {
         break;  // input exhausted; flush below
       }
     }
-    if (eof_ && written < dst.size()) {
+    if (eof_ && out_rd_ >= out_wr_ && written < dst.size()) {
       std::size_t flushed = resampler_.flush(out_buf_);
-      for (std::size_t i = 0; i < flushed; ++i) {
+      const std::size_t take = std::min(flushed, dst.size() - written);
+      for (std::size_t i = 0; i < take; ++i) {
         dst[written + i][0] = out_buf_[2 * i];
         dst[written + i][1] = out_buf_[2 * i + 1];
       }
-      written += flushed;
+      written += take;
     }
     return {written, !eof_ && written == dst.size()};
   }
@@ -280,6 +291,8 @@ private:
   std::vector<Frame>        staging_{std::size_t{4096}};
   std::vector<float>        in_buf_{std::size_t{4096} * 2};
   std::vector<float>        out_buf_;
+  std::ptrdiff_t            out_rd_   = 0;  // drained position in out_buf_
+  std::ptrdiff_t            out_wr_   = 0;  // produced end in out_buf_
   std::size_t               in_used_  = 0;
   std::string               err_;
 };

@@ -32,6 +32,43 @@ std::string iso_days(std::chrono::sys_days d) {
   return buf;
 }
 
+// parse_iso / format_iso convert the server's "YYYY-MM-DDTHH:MM:SSZ" shape —
+// the chain tests stamp the fake's aired_at values with the requested window
+// so the segment chronology holds across days.
+std::chrono::sys_seconds parse_iso(const std::string& s) {
+  int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
+  if (s.size() != 20 ||
+      std::sscanf(s.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi,
+                  &sec) != 6) {
+    return std::chrono::sys_seconds{};
+  }
+  const std::chrono::year_month_day ymd{
+      std::chrono::year{y} / std::chrono::month{static_cast<unsigned>(mo)} /
+      std::chrono::day{static_cast<unsigned>(d)}};
+  return std::chrono::sys_seconds{std::chrono::sys_days{ymd}} +
+         std::chrono::hours{h} + std::chrono::minutes{mi} +
+         std::chrono::seconds{sec};
+}
+
+std::string format_iso(std::chrono::sys_seconds tp) {
+  const auto day = std::chrono::floor<std::chrono::days>(tp);
+  const auto tod = tp - day;
+  const int h = static_cast<int>(
+      std::chrono::duration_cast<std::chrono::hours>(tod).count());
+  const int mi = static_cast<int>(
+                     std::chrono::duration_cast<std::chrono::minutes>(tod)
+                         .count()) %
+                 60;
+  const int sec = static_cast<int>(tod.count()) % 60;
+  const std::chrono::year_month_day ymd{day};
+  char buf[48];  // the real shape is 21 bytes; sized for GCC's int-range bound
+  std::snprintf(buf, sizeof buf, "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                static_cast<int>(ymd.year()),
+                static_cast<unsigned>(ymd.month()),
+                static_cast<unsigned>(ymd.day()), h, mi, sec);
+  return buf;
+}
+
 // iso_days_back is n days before the model's "today" — the model and the
 // test share gieres_local_today() as the single source of truth, so the
 // expected calendar is exact regardless of the machine's timezone or the
@@ -120,6 +157,11 @@ struct FakeArchive {
   std::vector<GieresSegment> segments;
   std::string   now_playing = "Radio Radio ..::.. Pink Floyd \"Hey You\"";
   std::string   coverage_from;
+  // extra_when_calls_gt appends an extra slice (id 999999) to a covered
+  // window response once seg_calls exceeds it — the chain's live-edge test
+  // sets it to the call count reached so far, so only the refresh (the next
+  // call) sees the timeline growing. Negative = never.
+  int           extra_when_calls_gt = -1;
   bool          fail = false;
 
   int org_calls = 0;
@@ -162,7 +204,24 @@ struct FakeArchive {
         return std::expected<std::vector<GieresSegment>, std::string>(
             std::vector<GieresSegment>{});
       }
-      return std::expected<std::vector<GieresSegment>, std::string>(segments);
+      // The canned segments stamped with the REQUESTED window start
+      // (30-minute slices from it), so the chain's aired_at chronology holds
+      // across days and the live-edge refresh filters the played prefix.
+      auto out = segments;
+      if (extra_when_calls_gt >= 0 && seg_calls > extra_when_calls_gt &&
+          !out.empty()) {
+        GieresSegment extra = out.back();
+        extra.id  = 999999;
+        extra.url = "/broadcasts/999999/audio.mp3";
+        out.push_back(std::move(extra));
+      }
+      const auto win = parse_iso(std::string{start});
+      for (std::size_t i = 0; i < out.size(); ++i) {
+        out[i].aired_at =
+            format_iso(win + std::chrono::minutes{30} *
+                                 static_cast<long long>(i));
+      }
+      return std::expected<std::vector<GieresSegment>, std::string>(out);
     };
     auto np = [this]() {
       ++np_calls;
@@ -625,6 +684,152 @@ TEST_CASE("gieres_day_window is the local day's 24h UTC midnight pair",
     REQUIRE(w.first == "2026-09-12T00:00:00Z");
     REQUIRE(w.second == "2026-09-13T00:00:00Z");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Echelon auto-continue chain (the user's spec: a finished segment rolls to
+// the next one, a day boundary fetches the next day's first, and today's
+// last segment gets ONE refresh — nothing new stops the chain)
+// ---------------------------------------------------------------------------
+
+// resolve_chain drives the watchdog pattern: the chain resolves through
+// repeated echelon_resolve_end calls (each watchdog tick drains a landed
+// chain fetch), so the test loops the same way until a non-Async outcome.
+GieresModel::EchelonEnd resolve_chain(GieresModel& m, const std::string& path,
+                                      Track* out) {
+  auto r = GieresModel::EchelonEnd::Async;
+  for (int i = 0; i < 1000; ++i) {
+    r = m.echelon_resolve_end(path, out);
+    if (r != GieresModel::EchelonEnd::Async) {
+      return r;
+    }
+    std::this_thread::yield();
+  }
+  return r;
+}
+
+TEST_CASE("echelon chain rolls the day's segments and stops at the live edge",
+          "[gieres][model]") {
+  FakeArchive fake;
+  fake.segments = fixture_segments();
+  GieresModel m = fake.make();
+  std::vector<Track> played;
+  m.set_actions(GieresActions{
+      .on_play_track    = [&](const Track& t) { played.push_back(t); },
+      .on_append_track  = {},
+      .on_append_tracks = {}});
+  m.open();
+  pump_until_done(m);          // the Live fetch
+  m.handle_key("shift+tab");   // → Echelon — the today window fetch
+  pump_until_done(m);
+  REQUIRE(fake.seg_calls == 1);
+  m.handle_key("enter");       // segment 0 plays and arms the chain
+  REQUIRE(played.size() == 1);
+
+  // A natural end rolls to the day's next segment — no fetch involved.
+  Track out;
+  REQUIRE(m.echelon_resolve_end(played.back().path, &out) ==
+          GieresModel::EchelonEnd::Track);
+  REQUIRE(out.path ==
+          "http://gieres.test/broadcasts/282596/audio.mp3");  // segment 1
+  // Segment 1 is the day's last: the live edge. One refresh of today's
+  // window brings nothing new (the fake repeats the same two slices) — the
+  // chain stops; afterwards the resolve is inert and a foreign track never
+  // rolls anything.
+  const int seg_calls_before = fake.seg_calls;
+  REQUIRE(m.echelon_resolve_end(out.path, &out) ==
+          GieresModel::EchelonEnd::Async);
+  REQUIRE(fake.seg_calls == seg_calls_before + 1);  // the refresh spawned
+  REQUIRE(resolve_chain(m, out.path, &out) ==
+          GieresModel::EchelonEnd::Stopped);
+  REQUIRE(m.echelon_resolve_end(out.path, &out) ==
+          GieresModel::EchelonEnd::Inactive);
+  REQUIRE(m.echelon_resolve_end("http://gieres.test/other.mp3", &out) ==
+          GieresModel::EchelonEnd::Inactive);
+}
+
+TEST_CASE("echelon chain crosses day boundaries to the next day's first",
+          "[gieres][model]") {
+  FakeArchive fake;
+  fake.segments      = fixture_segments();
+  fake.coverage_from = gieres_day_window(iso_days_back(2)).first;
+  GieresModel m = fake.make();
+  std::vector<Track> played;
+  m.set_actions(GieresActions{
+      .on_play_track    = [&](const Track& t) { played.push_back(t); },
+      .on_append_track  = {},
+      .on_append_tracks = {}});
+  m.open();
+  pump_until_done(m);
+  m.handle_key("shift+tab");   // → Echelon
+  pump_until_done(m);
+  m.handle_key("d");           // the calendar [t-2, t-1, t], cursor on today
+  pump_until_dates(m);
+  m.handle_key("up");
+  m.handle_key("up");          // → t-2
+  m.handle_key("enter");       // the t-2 day fetch
+  pump_until_done(m);
+  m.handle_key("enter");       // segment 0 of t-2 → the chain armed
+  REQUIRE(played.size() == 1);
+
+  Track out;
+  // t-2's segment 1 (same day, immediate).
+  REQUIRE(m.echelon_resolve_end(played.back().path, &out) ==
+          GieresModel::EchelonEnd::Track);
+  REQUIRE(out.path == "http://gieres.test/broadcasts/282596/audio.mp3");
+  // t-2's day end → the t-1 fetch resolves to its first segment.
+  REQUIRE(m.echelon_resolve_end(out.path, &out) ==
+          GieresModel::EchelonEnd::Async);
+  REQUIRE(resolve_chain(m, out.path, &out) == GieresModel::EchelonEnd::Track);
+  REQUIRE(out.path == "http://gieres.test/broadcasts/280905/audio.mp3");
+  // t-1's segment 1 (same day) → t's first segment (another boundary).
+  REQUIRE(m.echelon_resolve_end(out.path, &out) ==
+          GieresModel::EchelonEnd::Track);
+  REQUIRE(m.echelon_resolve_end(out.path, &out) ==
+          GieresModel::EchelonEnd::Async);
+  REQUIRE(resolve_chain(m, out.path, &out) == GieresModel::EchelonEnd::Track);
+  REQUIRE(out.path == "http://gieres.test/broadcasts/282596/audio.mp3");
+  // t's segment 1 is the day's last: the live edge — one refresh, nothing
+  // new (the fake repeats the same slices) → the chain stops.
+  REQUIRE(m.echelon_resolve_end(out.path, &out) ==
+          GieresModel::EchelonEnd::Track);
+  REQUIRE(m.echelon_resolve_end(out.path, &out) ==
+          GieresModel::EchelonEnd::Async);
+  REQUIRE(resolve_chain(m, out.path, &out) ==
+          GieresModel::EchelonEnd::Stopped);
+}
+
+TEST_CASE("echelon chain plays a segment that appears at the live edge",
+          "[gieres][model]") {
+  FakeArchive fake;
+  fake.segments = fixture_segments();
+  GieresModel m = fake.make();
+  std::vector<Track> played;
+  m.set_actions(GieresActions{
+      .on_play_track    = [&](const Track& t) { played.push_back(t); },
+      .on_append_track  = {},
+      .on_append_tracks = {}});
+  m.open();
+  pump_until_done(m);
+  m.handle_key("shift+tab");   // → Echelon
+  pump_until_done(m);
+  m.handle_key("down");        // → segment 1 (the day's last)
+  m.handle_key("enter");
+  REQUIRE(played.size() == 1);
+  // The timeline grows before the refresh lands: the fake starts serving an
+  // extra slice from the next window call on.
+  fake.extra_when_calls_gt = fake.seg_calls;
+  Track out;
+  REQUIRE(m.echelon_resolve_end(played.back().path, &out) ==
+          GieresModel::EchelonEnd::Async);
+  REQUIRE(resolve_chain(m, out.path, &out) == GieresModel::EchelonEnd::Track);
+  REQUIRE(out.path == "http://gieres.test/broadcasts/999999/audio.mp3");
+  // The chain is at the new last slice: one more refresh — still nothing
+  // newer → stop.
+  REQUIRE(m.echelon_resolve_end(out.path, &out) ==
+          GieresModel::EchelonEnd::Async);
+  REQUIRE(resolve_chain(m, out.path, &out) ==
+          GieresModel::EchelonEnd::Stopped);
 }
 
 TEST_CASE("maybe_load_more appends the next page near the bottom",

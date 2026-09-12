@@ -26,6 +26,7 @@
 #include "audio/streamer.hpp"
 
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -49,7 +50,14 @@ namespace detail {
 bool has_icy_header(const std::vector<std::pair<std::string, std::string>>& headers) {
   for (const auto& [k, v] : headers) {
     (void)v;
-    if (k.starts_with("icy-")) return true;
+    // Go's header-name loop is case-insensitive (http.Header canonicalizes
+    // keys); the client lowercases what it stores, but this helper is also
+    // fed raw header maps by the tests.
+    std::string lower{k};
+    for (char& c : lower) {
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (lower.starts_with("icy-")) return true;
   }
   return false;
 }

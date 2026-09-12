@@ -187,6 +187,13 @@ std::vector<playlist::Track> scan_tracks(const std::vector<std::string>& files) 
       }
     });
   }
+  // Go wg.Wait(): join before returning. The return value is initialized
+  // before local destructors run, so jthread's implicit join would happen
+  // after `tracks` has been moved out — entries not yet written would race
+  // with the move and surface as empty tracks.
+  for (auto& worker : pool) {
+    worker.join();
+  }
   return tracks;
 }
 

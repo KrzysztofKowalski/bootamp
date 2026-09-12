@@ -66,7 +66,10 @@ std::string interp_env(std::string_view s) {
   }
   if (!is_env_name(name)) return std::string(s);
   // os.Getenv returns "" for unset vars (no unset-vs-empty distinction).
-  if (const char* v = std::getenv(name.data())) return std::string(v);
+  // getenv needs a NUL-terminated name; `name` is a view into the value's
+  // buffer and for "${NAME}" the closing brace sits right after it, so copy
+  // before the lookup.
+  if (const char* v = std::getenv(std::string(name).c_str())) return std::string(v);
   return std::string();
 }
 
@@ -354,7 +357,7 @@ std::string_view section_name(std::string_view header) {
 
 void Config::clamp() {
   volume_min = std::clamp(volume_min, -90.0, 0.0);
-  volume     = std::clamp(volume, volume_min, 24.0);
+  volume     = std::clamp(volume, volume_min, 6.0);
   if (speed < 0.25 || speed > 2.0) speed = 1.0;
   seek_step_large   = std::clamp(seek_step_large, 6, 600);
   sample_rate       = clamp_sample_rate(sample_rate);
@@ -422,7 +425,12 @@ std::expected<Config, std::string> load() {
   if (const auto* t = tbl["spotify"].as_table())       read_spotify(*t, cfg.spotify);
   if (const auto* t = tbl["qobuz"].as_table())         read_qobuz(*t, cfg.qobuz);
   if (const auto* t = tbl["tidal"].as_table())         read_tidal(*t, cfg.tidal);
-  if (const auto* t = tbl["ytmusic"].as_table())        read_ytmusic(*t, cfg.ytmusic);
+  // [yt]/[youtube]/[ytmusic] all feed YouTubeMusic: cliamp normalizes the
+  // section name to "ytmusic" before parsing keys, so the alias tables carry
+  // client_id/client_secret/cookies_from too.
+  for (const char* key : {"ytmusic", "yt", "youtube"}) {
+    if (const auto* t = tbl[key].as_table()) read_ytmusic(*t, cfg.ytmusic);
+  }
   if (const auto* t = tbl["plex"].as_table())          read_plex(*t, cfg.plex);
   if (const auto* t = tbl["soundcloud"].as_table())    read_soundcloud(*t, cfg.soundcloud);
   if (const auto* t = tbl["netease"].as_table())       read_netease(*t, cfg.netease);

@@ -247,6 +247,13 @@ std::size_t stretch_one_step(WsolaState& state, std::span<const double> input,
   }
   const std::ptrdiff_t in_frames = static_cast<std::ptrdiff_t>(input.size() / channels);
   const std::ptrdiff_t exp = static_cast<std::ptrdiff_t>(std::round(state.input_pos));
+  // End on the ANALYSIS cursor: src_off is clamped to in_frames - kTsWin
+  // below, and kTsSeq < kTsWin, so the src_off-based end check can never
+  // fire once the cursor runs past the input — a state-based pull loop
+  // would spin forever on it.
+  if (exp + static_cast<std::ptrdiff_t>(kTsSeq) > in_frames) {
+    return 0;
+  }
 
   // Candidate range (Go: maxOff/lo/hi from inN and expected).
   const std::ptrdiff_t max_off = std::max<std::ptrdiff_t>(
