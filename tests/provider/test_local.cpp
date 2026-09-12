@@ -78,8 +78,8 @@ void make_audio_tree(const fs::path& dir) {
 }
 
 // write_playlist writes a raw playlist file (Go fixtures). A name that
-// already ends in .toml is written verbatim, so the non-toml-entries fixture
-// can plant a stray "ignored.txt" that Playlists() must skip.
+// already ends in .toml is written verbatim; any other name gets .toml
+// appended (Go filepath.Join(dir, name+".toml") in the save path).
 void write_playlist(const fs::path& dir, std::string_view name, std::string_view content) {
   fs::create_directories(dir);
   std::string fname(name);
@@ -348,7 +348,12 @@ TEST_CASE("Playlists skips non-toml and directory entries", "[local][playlists]"
   auto env = TempEnv::make();
   REQUIRE(env.p != nullptr);
   write_playlist(env.root / "playlists", "real", "[[track]]\npath = \"/a.mp3\"\n");
-  write_playlist(env.root / "playlists", "ignored.txt", "not a playlist");
+  // The stray non-toml file is written directly: write_playlist would append
+  // ".toml" to "ignored.txt" and plant a playlist instead of a file to skip.
+  {
+    std::ofstream out(env.root / "playlists" / "ignored.txt", std::ios::binary);
+    out << "not a playlist";
+  }
   fs::create_directories(env.root / "playlists" / "dir.toml");
 
   const auto lists = env.p->playlists();
@@ -588,7 +593,8 @@ TEST_CASE("removeTrack removes by index and keeps empty playlists", "[local][rem
 
   CHECK_FALSE(env.p->remove_track("rem", 5).has_value());  // out of range
 
-  REQUIRE(env.p->remove_track("rem", 0).has_value());
+  REQUIRE(env.p->remove_track("rem", 0).has_value());  // [A, C] -> [C]
+  REQUIRE(env.p->remove_track("rem", 0).has_value());  // [C] -> empty
   const auto last = env.p->tracks("rem");
   REQUIRE(last.has_value());
   CHECK(last->empty());

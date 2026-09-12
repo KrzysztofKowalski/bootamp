@@ -549,6 +549,12 @@ void GieresModel::fetch(const bool append) {
   }
   fetch_thread_ = std::jthread([this, key](std::stop_token stoken) {
     if (stoken.stop_requested()) {
+      // A stop before the body ran means no one will publish into inbox_,
+      // so pump() never clears loading_ — release the single-flight latch
+      // here or the model stays "loading" forever (a wedged GieresModel
+      // deadlocks every later join in fetch()/~GieresModel on the futex
+      // the stopped thread left behind).
+      loading_.store(false, std::memory_order_release);
       return;
     }
     auto result = std::make_shared<FetchResult>(*key);
@@ -644,6 +650,10 @@ void GieresModel::fetch_dates() {
   }
   dates_thread_ = std::jthread([this, key, known_first](std::stop_token stoken) {
     if (stoken.stop_requested()) {
+      // Same as the fetch body: the stopped thread publishes nothing, so
+      // pump() never sees a dates result — release dates_loading_ instead
+      // of leaving the single-flight latch wedged on.
+      dates_loading_.store(false, std::memory_order_release);
       return;
     }
     auto result = std::make_shared<FetchResult>(*key);
@@ -698,6 +708,7 @@ void GieresModel::fetch_dates() {
         break;
       }
       if (stoken.stop_requested()) {
+        dates_loading_.store(false, std::memory_order_release);
         return;
       }
       hi -= std::chrono::days{1};
@@ -724,6 +735,7 @@ void GieresModel::fetch_dates() {
     } else {
       while (hi - lo > std::chrono::days{1}) {
         if (stoken.stop_requested()) {
+          dates_loading_.store(false, std::memory_order_release);
           return;
         }
         const auto mid = lo + (hi - lo) / 2;
@@ -883,9 +895,10 @@ void GieresModel::pump() {
 
 void GieresModel::maybe_load_more() {
   // Only the Orgonity recording list is paginated: the Echelon segments are
-  // one fixed day window and the date index is complete, so neither lazy-
-  // loads (a near-bottom refetch there would just re-fetch the same day).
-  if (view_ != View::Orgonity) {
+  // one fixed day window, and the date index and its Day sub-view are
+  // complete, so none of those lazy-load (a near-bottom refetch there would
+  // just re-fetch the same day or, in Dates, race the enter-on-a-date fetch).
+  if (view_ != View::Orgonity || org_view_ != OrgView::List) {
     return;
   }
   const int n = list_count();
@@ -1165,6 +1178,10 @@ void GieresModel::spawn_chain_fetch(std::string date) {
   }
   chain_thread_ = std::jthread([this, key](std::stop_token stoken) {
     if (stoken.stop_requested()) {
+      // Same as the fetch body: nothing lands in chain_inbox_, so
+      // echelon_resolve_end would report Async forever on a latch no one
+      // clears — release chain_loading_ before leaving.
+      chain_loading_.store(false, std::memory_order_release);
       return;
     }
     auto result = std::make_shared<FetchResult>(*key);

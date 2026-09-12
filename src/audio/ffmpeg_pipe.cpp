@@ -363,30 +363,41 @@ std::string FfmpegPipe::wait_for_audio_bytes(std::size_t n,
   std::jthread peek([&](std::stop_token stoken) {
     // bufio.Peek(n) analog: serve from the buffer first, then block in read
     // until n bytes total are available or EOF/error.
+    // Go's goroutine parks in a blocking read, so when the deadline fires
+    // with no data the caller's timer wins and stop() unblocks the peek —
+    // an EOF is only ever what a *completed* read reports (ffmpeg.go
+    // waitForAudioBytes select). With poll() the loop can also exit at the
+    // deadline on its own; that expiry is a timeout, NOT an EOF, and must
+    // leave peek_err empty so the caller reports the deadline instead.
     const std::size_t buffered =
         (rpos_ < rbuf_.size()) ? rbuf_.size() - rpos_ : 0;
     const std::size_t served = std::min(n, buffered);
+    bool read_eof = false;  // a completed read hit EOF/error
     while (served + got_new < n) {
       const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
           deadline - std::chrono::steady_clock::now());
       if (remaining.count() <= 0 || stoken.stop_requested()) {
-        break;
+        break;  // deadline expiry: a timeout, not an EOF
       }
       struct pollfd pfd {stdout_fd, POLLIN, 0};
       const int pr = ::poll(&pfd, 1, static_cast<int>(remaining.count()));
-      if (pr <= 0) {
-        break;  // deadline or poll error
+      if (pr == 0) {
+        break;  // poll deadline: a timeout, not an EOF
+      }
+      if (pr < 0) {
+        break;  // poll error: treat like the deadline (no EOF was read)
       }
       const ssize_t r = read_eintr(stdout_fd, scratch.data() + got_new,
                                    n - served - got_new);
       if (r <= 0) {
+        read_eof = true;  // poll said readable: a real EOF/error
         break;
       }
       got_new += static_cast<std::size_t>(r);
     }
     {
       std::lock_guard<std::mutex> lk(mu);
-      if (served + got_new < n) {
+      if (read_eof && served + got_new < n) {
         peek_err = (served + got_new == 0) ? "EOF" : "unexpected EOF";
       }
       done.store(true, std::memory_order_release);
@@ -424,6 +435,20 @@ std::string FfmpegPipe::wait_for_audio_bytes(std::size_t n,
       return "waiting for audio data: " + peek_err;
     }
     stash();
+    // The peek exited at its own deadline without reading an EOF (poll
+    // returned 0 while the pipe still had a live writer) — the same instant
+    // this thread's wait_for deadline expires, so either side of the race can
+    // land here first. Go's timer branch wins in that case: interrupt the
+    // pipe and report the deadline.
+    const std::size_t buffered =
+        (rpos_ < rbuf_.size()) ? rbuf_.size() - rpos_ : 0;
+    if (got_new + std::min(n, buffered) < n) {
+      lk.unlock();
+      (void)stop();
+      std::unique_lock<std::mutex> lk2(mu);
+      cv.wait(lk2, [&] { return done.load(std::memory_order_acquire); });
+      return "timed out waiting for audio data (" + format_duration(timeout) + ")";
+    }
     return std::string{};
   }
 

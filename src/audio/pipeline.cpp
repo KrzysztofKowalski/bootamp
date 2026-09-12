@@ -221,7 +221,8 @@ std::expected<SourceResult, std::string> open_source(const std::string& path,
 class ResampleStreamer final : public Streamer {
 public:
   ResampleStreamer(std::shared_ptr<Streamer> src, int in_rate, int out_rate)
-    : src_(std::move(src)), ok_(resampler_.configure(in_rate, out_rate, 2)) {}
+    : src_(std::move(src)), in_rate_(in_rate), out_rate_(out_rate),
+      ok_(resampler_.configure(in_rate, out_rate, 2)) {}
 
   std::pair<std::size_t, bool> stream(std::span<Frame> dst) override {
     if (!ok_ || !src_) {
@@ -229,7 +230,6 @@ public:
       return {0, false};
     }
     std::size_t written = 0;
-    out_buf_.resize(dst.size() * 2);
     while (written < dst.size()) {
       // Emit buffered output first: swr may over-produce relative to the
       // room left in dst on the last iteration, and copying produced frames
@@ -260,6 +260,21 @@ public:
         }
         in_used_ = n * 2;
       }
+      // Size the swr output for THIS input chunk (the engine does the same:
+      // out_cap = n*out/in + headroom), never for the whole dst span. A
+      // large out count vs a small in count makes libswresample keep
+      // accumulating consumed input in its internal FIFO without producing
+      // (produced == 0 for every 4096-frame chunk), and the accumulated
+      // source frames then overflow the FIFO allocation — the heap smash
+      // that corrupted the ResampleStreamer object (segfault in the
+      // "resample wrap" test). The ring above carries any remainder across
+      // stream() calls, so a per-chunk buffer loses nothing.
+      const std::size_t in_used_frames = in_used_ / 2;  // stereo: 2 floats/frame
+      const std::size_t out_need =
+          in_used_frames * static_cast<std::size_t>(out_rate_) /
+              static_cast<std::size_t>(std::max(in_rate_, 1)) +
+          kConvertHeadroom;
+      out_buf_.resize(out_need * 2);
       std::size_t produced = resampler_.process(
           std::span<const float>(in_buf_.data(), in_used_), out_buf_);
       in_used_ = 0;  // process() consumed the input given
@@ -270,6 +285,10 @@ public:
       }
     }
     if (eof_ && out_rd_ >= out_wr_ && written < dst.size()) {
+      // The flush tail (accumulated FIFO + filter delay) can exceed the last
+      // chunk's out_need; give it the room left in dst — same size swr sees
+      // when the ring is drained and converted frames go straight to dst.
+      out_buf_.resize((dst.size() - written) * 2);
       std::size_t flushed = resampler_.flush(out_buf_);
       const std::size_t take = std::min(flushed, dst.size() - written);
       for (std::size_t i = 0; i < take; ++i) {
@@ -284,8 +303,14 @@ public:
   std::string err() const override { return err_; }
 
 private:
+  // Headroom on top of the rate-mapped chunk size so swr never produces
+  // more than the ring can hold for a single 4096-frame input chunk.
+  static const std::size_t kConvertHeadroom = 4096;
+
   std::shared_ptr<Streamer> src_;
   dsp::Resampler            resampler_;
+  int                       in_rate_  = 0;
+  int                       out_rate_ = 0;
   bool                      ok_       = false;
   bool                      eof_      = false;
   std::vector<Frame>        staging_{std::size_t{4096}};
