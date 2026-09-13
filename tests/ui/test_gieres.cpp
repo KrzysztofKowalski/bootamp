@@ -82,11 +82,35 @@ std::string iso_days_back(const int n) {
   return iso_days(std::chrono::sys_days{ymd} - std::chrono::days{n});
 }
 
+// kPumpBudget bounds every wait loop below. It is deliberately large: the
+// suite runs ~8 binaries at once (-j8 in scripts/test.sh), and a machine
+// oversubscribed with build/test processes can take a while to schedule a
+// freshly-spawned fetch thread for its first run slice — a tight budget on a
+// loading()-only wait then flakes (the fetch never visibly lands before the
+// helper gives up, and the keyed stale-drop in pump() never retries it).
+constexpr int kPumpBudget = 100000;
+
 // pump_until_done spins pump() until the background fetch landed (the
 // test_screens.cpp lazy-catalog pattern: yield until loading clears, then one
 // final pump in case the result landed between checks).
 void pump_until_done(GieresModel& m) {
-  for (int i = 0; i < 1000 && m.loading(); ++i) {
+  for (int i = 0; i < kPumpBudget && m.loading(); ++i) {
+    m.pump();
+    std::this_thread::yield();
+  }
+  m.pump();
+}
+
+// pump_until spins pump() until an observable, already-applied model state
+// holds (e.g. the Orgonity List rows or the Echelon segment rows that a
+// landed fetch produced) — the same yield-until-visible pattern as below.
+// Waiting on a visible signal instead of raw loading() makes a test robust to
+// fetch-thread scheduling delays AND to a stale drop (loading() would clear
+// while the requested view never loads); the final pump covers the result
+// that landed between the check and the exit.
+template <typename Pred>
+void pump_until(GieresModel& m, Pred pred) {
+  for (int i = 0; i < kPumpBudget && !pred(); ++i) {
     m.pump();
     std::this_thread::yield();
   }
@@ -98,7 +122,7 @@ void pump_until_done(GieresModel& m) {
 // fixture's three date rows appearing (row_count: 1 hint row → 3) is the
 // observable signal — the same yield-until-visible pattern as above.
 void pump_until_dates(GieresModel& m) {
-  for (int i = 0; i < 1000 && m.row_count() != 3; ++i) {
+  for (int i = 0; i < kPumpBudget && m.row_count() != 3; ++i) {
     m.pump();
     std::this_thread::yield();
   }
@@ -260,7 +284,10 @@ TEST_CASE("sanitize_query keeps only [A-Za-z0-9 _-]", "[gieres][client]") {
   REQUIRE(GieresClient::sanitize_query("Most#2") == "Most2");
   REQUIRE(GieresClient::sanitize_query("operacja most-2_ok") ==
           "operacja most-2_ok");
-  REQUIRE(GieresClient::sanitize_query("złodziej") == "zodiej");  // ł dropped
+  // ł (non-ASCII) dropped → z-<drop>-o-d-z-i-e-j = "zodziej" (the second z is
+  // ASCII and survives; docs/orgonity-api.md §7: q is cleaned to
+  // [A-Za-z0-9 _-]).
+  REQUIRE(GieresClient::sanitize_query("złodziej") == "zodziej");
   REQUIRE(GieresClient::sanitize_query("") == "");
 }
 
@@ -430,14 +457,21 @@ TEST_CASE("y appends the cursor recording; echelon y appends the whole day",
   m.open();
   pump_until_done(m);   // settle Live first
   m.handle_key("tab");  // → Orgonity
-  pump_until_done(m);
+  // Wait for the two recording rows to be VISIBLE (drained into the model),
+  // not just for loading() to clear: the latter can clear on a stale drop
+  // that never populates this view (a -j8 scheduling delay can make the tab
+  // land while the Live fetch is still in flight, skipping the Orgonity
+  // fetch and leaving recordings_/dates_ empty forever).
+  pump_until(m, [&] { return m.row_count() == 2; });
   m.handle_key("y");
   REQUIRE(appended.size() == 1);
   REQUIRE(appended[0].path == "http://gieres.test/broadcasts/1900/audio.mp3");
 
   // → Echelon; y appends every segment so the queue chains them gapless.
   m.handle_key("tab");
-  pump_until_done(m);
+  // The Echelon segment rows are the visible signal that the segmented day
+  // fetch landed (fake.seg_calls becomes 1 only in that worker thread).
+  pump_until(m, [&] { return m.row_count() == 2; });
   REQUIRE(fake.seg_calls == 1);
   REQUIRE(m.row_count() == 2);
   m.handle_key("y");
@@ -463,7 +497,13 @@ TEST_CASE("d opens the date index and enter fetches a day", "[gieres][model]") {
   m.open();
   pump_until_done(m);   // settle Live first
   m.handle_key("tab");  // → Orgonity
-  pump_until_done(m);
+  // Wait for the recording rows to be visible before pressing d. This is the
+  // crux of the flake this tested: with loading() still true at the tab (the
+  // Live fetch scheduled late under -j8) the Orgonity fetch is skipped, "d"
+  // then sees dates_ empty and — because it also skips its fetch while
+  // loading() — the in-flight listing lands as stale and is dropped, so the
+  // date index stays at row_count 0 forever.
+  pump_until(m, [&] { return m.row_count() == 2; });
   m.handle_key("d");
   REQUIRE(m.org_view() == GieresModel::OrgView::Dates);
   REQUIRE(m.row_count() == 3);  // dates_ rode the /orgonity.json fetch
@@ -517,7 +557,12 @@ TEST_CASE("echelon t expands the program listing; enter plays the segment",
   // global player table (seek ±5s).
   REQUIRE_FALSE(m.handle_key("left"));
   REQUIRE_FALSE(m.handle_key("right"));
-  // esc at the top level closes the screen.
+  // esc walks back a level and finally closes the screen: the program
+  // listing is still expanded (enter played a program, it did not collapse),
+  // so the first esc collapses it and the second closes the screen.
+  m.handle_key("esc");
+  REQUIRE(m.visible());
+  REQUIRE(m.row_count() == 2);  // the expansion collapsed back to the segment rows
   m.handle_key("esc");
   REQUIRE_FALSE(m.visible());
 }
@@ -698,7 +743,7 @@ TEST_CASE("gieres_day_window is the local day's 24h UTC midnight pair",
 GieresModel::EchelonEnd resolve_chain(GieresModel& m, const std::string& path,
                                       Track* out) {
   auto r = GieresModel::EchelonEnd::Async;
-  for (int i = 0; i < 1000; ++i) {
+  for (int i = 0; i < kPumpBudget; ++i) {
     r = m.echelon_resolve_end(path, out);
     if (r != GieresModel::EchelonEnd::Async) {
       return r;
@@ -739,6 +784,13 @@ TEST_CASE("echelon chain rolls the day's segments and stops at the live edge",
   const int seg_calls_before = fake.seg_calls;
   REQUIRE(m.echelon_resolve_end(out.path, &out) ==
           GieresModel::EchelonEnd::Async);
+  // The live-edge refresh runs on the chain's OWN thread (the watchdog
+  // pattern), so the spawned fetch lands asynchronously — wait for it to
+  // actually fire before counting (resolve_chain's drain loop below yields,
+  // but the count must be observed before the result is consumed).
+  for (int i = 0; i < kPumpBudget && fake.seg_calls == seg_calls_before; ++i) {
+    std::this_thread::yield();
+  }
   REQUIRE(fake.seg_calls == seg_calls_before + 1);  // the refresh spawned
   REQUIRE(resolve_chain(m, out.path, &out) ==
           GieresModel::EchelonEnd::Stopped);
@@ -788,7 +840,10 @@ TEST_CASE("echelon chain crosses day boundaries to the next day's first",
   REQUIRE(m.echelon_resolve_end(out.path, &out) ==
           GieresModel::EchelonEnd::Async);
   REQUIRE(resolve_chain(m, out.path, &out) == GieresModel::EchelonEnd::Track);
-  REQUIRE(out.path == "http://gieres.test/broadcasts/282596/audio.mp3");
+  // t's FIRST segment (the same "next day's first" roll as the t-2→t-1
+  // boundary above — the earlier "282596" here was a copy-paste of the
+  // same-day roll's expectation).
+  REQUIRE(out.path == "http://gieres.test/broadcasts/280905/audio.mp3");
   // t's segment 1 is the day's last: the live edge — one refresh, nothing
   // new (the fake repeats the same slices) → the chain stops.
   REQUIRE(m.echelon_resolve_end(out.path, &out) ==
@@ -822,7 +877,13 @@ TEST_CASE("echelon chain plays a segment that appears at the live edge",
   Track out;
   REQUIRE(m.echelon_resolve_end(played.back().path, &out) ==
           GieresModel::EchelonEnd::Async);
-  REQUIRE(resolve_chain(m, out.path, &out) == GieresModel::EchelonEnd::Track);
+  // The previous resolve was Async and left *out untouched — out.path is
+  // still the default "". resolve_chain must be fed the path of the track
+  // that just finished (the chain's armed chain_track_), or the very first
+  // echelon_resolve_end inside the loop bails into EchelonEnd::Inactive on
+  // the "" != chain_track_ mismatch.
+  REQUIRE(resolve_chain(m, played.back().path, &out) ==
+          GieresModel::EchelonEnd::Track);
   REQUIRE(out.path == "http://gieres.test/broadcasts/999999/audio.mp3");
   // The chain is at the new last slice: one more refresh — still nothing
   // newer → stop.

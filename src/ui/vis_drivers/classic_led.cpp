@@ -203,10 +203,10 @@ public:
       return kTickSlow;
     }
     if (ctx.playing || animating()) {
-      // Go model.tickInterval: band modes run at TickFast (50ms = kTickSpectrum)
-      // while playing (classicLED's own 30 FPS frameInterval only applies at
-      // the driver level, which the model overrides while playing).
-      return kTickSpectrum;
+      // Go classicLEDDriver.frameInterval = time.Second/30 (33ms): the
+      // driver's own 30 FPS body-animation cadence. The model's TickFast
+      // floor while audio plays is the app wiring's job (TickLoop contract).
+      return kTickAnim;
     }
     return kTickSlow;
   }

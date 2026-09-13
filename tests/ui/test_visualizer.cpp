@@ -365,7 +365,9 @@ TEST_CASE("tick_interval follows driver cadence, paused and no-driver fallbacks"
   v.set_mode(VisMode::Logo);
   v.tick(tick_ctx(t0, src));  // creates the Logo driver
 
-  REQUIRE(v.tick_interval(tick_ctx(t0, src)) == kTickFast);             // playing
+  // Go Logo = newRenderOnlyDriver -> defaultDriverTickInterval: TickFast
+  // (50ms = kTickSpectrum) while playing.
+  REQUIRE(v.tick_interval(tick_ctx(t0, src)) == kTickSpectrum);        // playing
   REQUIRE(v.tick_interval(tick_ctx(t0, src, /*paused=*/true)) == kTickSlow);
   REQUIRE(v.tick_interval(tick_ctx(t0, src, /*paused=*/false, /*playing=*/true,
                                    /*overlay=*/true)) == kTickSlow);
@@ -489,7 +491,9 @@ TEST_CASE("logo driver declares the default 10-band spec") {
   BandSource src;
   VisTickContext ctx;
   ctx.playing = true;
-  REQUIRE(driver->tick_interval(ctx) == kTickFast);
+  // Go Logo = newRenderOnlyDriver -> defaultDriverTickInterval: TickFast
+  // (50ms = kTickSpectrum) while playing.
+  REQUIRE(driver->tick_interval(ctx) == kTickSpectrum);
   ctx.playing = false;
   REQUIRE(driver->tick_interval(ctx) == kTickSlow);
   ctx.playing = true;

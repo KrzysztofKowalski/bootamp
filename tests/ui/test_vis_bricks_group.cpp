@@ -90,10 +90,10 @@ TEST_CASE("bricks/mosaic/matrix/rain/retro declare the default 10-band spec") {
   }
 }
 
-TEST_CASE("bricks ticks at the animation cadence while playing") {
+TEST_CASE("bricks ticks at the fast-render-only cadence while playing") {
   auto driver = vd::make_bricks_driver();
-  // cliamp newFastRenderOnlyDriver(TickAnim).
-  REQUIRE(driver->tick_interval(playing_ctx()) == kTickAnim);
+  // cliamp newFastRenderOnlyDriver(TickAnim, 16ms = the C++ fast tier).
+  REQUIRE(driver->tick_interval(playing_ctx()) == kTickFast);
   REQUIRE(driver->tick_interval(idle_ctx()) == kTickSlow);
 
   VisTickContext overlay = playing_ctx();
@@ -106,8 +106,9 @@ TEST_CASE("mosaic/matrix/rain/retro use the default driver interval") {
       vd::make_mosaic_driver(), vd::make_matrix_driver(),
       vd::make_rain_driver(), vd::make_retro_driver()};
   for (const auto& driver : drivers) {
-    // cliamp defaultDriverTickInterval: fast only while playing live.
-    REQUIRE(driver->tick_interval(playing_ctx()) == kTickFast);
+    // cliamp defaultDriverTickInterval: Go TickFast (50ms) while playing
+    // live — kTickSpectrum in the C++ contract.
+    REQUIRE(driver->tick_interval(playing_ctx()) == kTickSpectrum);
     REQUIRE(driver->tick_interval(idle_ctx()) == kTickSlow);
 
     VisTickContext overlay = playing_ctx();
@@ -125,8 +126,10 @@ TEST_CASE("bricks fills brick cells above the row threshold") {
 
   CellGrid loud(5, 40);
   driver->render(uniform_bands(10, 1.0f), 0, loud);
-  // level 1.0 > every row threshold -> every cell is a half-block brick.
-  REQUIRE(count_cells(loud, [](const Cell& c) { return c.rune == U'▄'; }) == 5 * 40);
+  // level 1.0 > every row threshold -> every band cell is a half-block brick;
+  // the single inter-band gaps stay spaces (Go renderBricks). Width layout:
+  // 10 bands on 40 cols = 31 band cols + 9 gaps per row, i.e. 155 bricks.
+  REQUIRE(count_cells(loud, [](const Cell& c) { return c.rune == U'▄'; }) == 155);
   // Every line carries the spectrum color of its row-bottom tier (Go specWrap):
   // top rows high, bottom rows low.
   REQUIRE(loud.at(0, 0).color == kColorSpecHigh);   // threshold 0.8
@@ -289,9 +292,10 @@ TEST_CASE("retro renders a braille scene with wave/sun/grid priority colors") {
     }
   }
   // Sun (tier mid) above the horizon, wave (tier high) at the horizon on top
-  // of it, grid floor (tier low) below.
-  REQUIRE(grid.at(0, 9).color == kColorSpecMid);   // sun, braille col 9
-  REQUIRE(grid.at(1, 9).color == kColorSpecHigh);  // wave overrides sun
+  // of it, grid floor (tier low) below. The sun spans braille cols ~17-22 in
+  // a 5x40 panel; col 19 is interior.
+  REQUIRE(grid.at(0, 19).color == kColorSpecMid);  // sun interior dot
+  REQUIRE(grid.at(1, 19).color == kColorSpecHigh); // wave overrides sun
   REQUIRE(grid.at(4, 10).color == kColorSpecLow);  // floor vertical line
 }
 
@@ -302,7 +306,7 @@ TEST_CASE("retro renders the scene without band input") {
   CellGrid grid(5, 40);
   driver->render({}, 0, grid);
   REQUIRE(count_cells(grid, [](const Cell& c) { return c.rune != U'⠀'; }) > 0);
-  REQUIRE(grid.at(0, 9).color == kColorSpecMid);   // sun still drawn
+  REQUIRE(grid.at(0, 19).color == kColorSpecMid);  // sun interior dot drawn
   REQUIRE(grid.at(4, 10).color == kColorSpecLow);  // floor still drawn
 }
 

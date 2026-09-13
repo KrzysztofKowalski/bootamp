@@ -225,10 +225,18 @@ std::chrono::milliseconds ClassicPeakDriver::tick_interval(
     return kTickSlow;
   }
   if (ctx.playing || animating_) {
-    // Go model.tickInterval: band modes run at TickFast (50ms = kTickSpectrum)
-    // while playing (classicPeak's own frameInterval only applies at the
-    // driver level, which the model overrides while playing).
-    return kTickSpectrum;
+    // Go classicPeakDriver.frameInterval: fps = clamp(launchMax * rows *
+    // glyphRows, minFPS, maxFPS) with rows = max(DefaultVisRows, last render
+    // height) — 1000/34 = 29ms at the default 5 rows. The model's TickFast
+    // floor while audio plays is the app wiring's job (TickLoop contract).
+    int rows = 5;  // Go DefaultVisRows
+    if (rows_ > rows) {
+      rows = rows_;
+    }
+    double fps = kClassicPeakLaunchMax *
+                 static_cast<double>(rows * 4);  // 4 = len(classicPeakGlyphs)
+    fps = std::clamp(fps, kClassicPeakMinFPS, kClassicPeakMaxFPS);
+    return std::chrono::milliseconds(static_cast<long long>(1000.0 / fps));
   }
   return kTickSlow;
 }

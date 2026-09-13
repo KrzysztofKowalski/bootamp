@@ -126,7 +126,9 @@ TEST_CASE("pulse driver: 10-band spec and default cadence") {
 
   VisTickContext ctx;
   ctx.playing = true;
-  REQUIRE(driver->tick_interval(ctx) == kTickFast);
+  // Go registers Pulse/Binary via newRenderOnlyDriver ->
+  // defaultDriverTickInterval: TickFast (50ms = kTickSpectrum) while playing.
+  REQUIRE(driver->tick_interval(ctx) == kTickSpectrum);
   ctx.playing = false;
   REQUIRE(driver->tick_interval(ctx) == kTickSlow);
   ctx.playing = true;
@@ -270,7 +272,7 @@ TEST_CASE("heartbeat driver: golden output when present") {
 // Ascii
 // ---------------------------------------------------------------------------
 
-TEST_CASE("ascii driver: 10-band spec and TickAnim cadence") {
+TEST_CASE("ascii driver: 10-band spec and fast-render-only cadence") {
   auto driver = make_ascii_driver();
   REQUIRE(driver != nullptr);
   REQUIRE(driver->analysis_spec().band_count == 10);
@@ -278,7 +280,8 @@ TEST_CASE("ascii driver: 10-band spec and TickAnim cadence") {
 
   VisTickContext ctx;
   ctx.playing = true;
-  REQUIRE(driver->tick_interval(ctx) == kTickAnim);  // cliamp TickAnim cadence
+  // cliamp newFastRenderOnlyDriver(TickAnim, 16ms = the C++ fast tier).
+  REQUIRE(driver->tick_interval(ctx) == kTickFast);
   ctx.playing = false;
   REQUIRE(driver->tick_interval(ctx) == kTickSlow);
   ctx.playing = true;
@@ -355,7 +358,9 @@ TEST_CASE("binary driver: 10-band spec and default cadence") {
 
   VisTickContext ctx;
   ctx.playing = true;
-  REQUIRE(driver->tick_interval(ctx) == kTickFast);
+  // Go registers Pulse/Binary via newRenderOnlyDriver ->
+  // defaultDriverTickInterval: TickFast (50ms = kTickSpectrum) while playing.
+  REQUIRE(driver->tick_interval(ctx) == kTickSpectrum);
   ctx.playing = false;
   REQUIRE(driver->tick_interval(ctx) == kTickSlow);
   ctx.playing = true;
@@ -396,20 +401,29 @@ TEST_CASE("binary driver: bit stream output, determinism, energy bias") {
   };
   REQUIRE(count_ones(loud) > count_ones(quiet));
 
-  // Bright colors on 1s of high-energy bands (tag 2/1), dim otherwise.
-  bool saw_bright = false, saw_dim = false;
+  // Bright colors on 1s of high-energy bands (tag 2/1). The dim tier (tag 0)
+  // only ever appears on 0s of low-energy bands (Go renderBinary: a '1' or
+  // energy > 0.3 never drops to tag 0), so a full-scale render has NO dim
+  // cells — check the quiet render for the dim tier instead.
+  bool saw_bright = false;
   for (int r = 0; r < loud.rows(); ++r) {
     for (int c = 0; c < loud.cols(); ++c) {
       if (loud.at(r, c).color == kColorSpecHigh) {
         saw_bright = true;
       }
-      if (loud.at(r, c).color == kColorSpecLow) {
-        saw_dim = true;
-      }
     }
   }
   REQUIRE(saw_bright);
-  REQUIRE(saw_dim);
+
+  bool quiet_saw_dim = false;
+  for (int r = 0; r < quiet.rows(); ++r) {
+    for (int c = 0; c < quiet.cols(); ++c) {
+      if (quiet.at(r, c).color == kColorSpecLow) {
+        quiet_saw_dim = true;
+      }
+    }
+  }
+  REQUIRE(quiet_saw_dim);
 }
 
 TEST_CASE("binary driver: golden output when present") {

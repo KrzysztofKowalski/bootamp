@@ -99,9 +99,18 @@ std::filesystem::path golden_path(std::string_view mode) {
   const auto src_dir = std::filesystem::path(__FILE__).parent_path();
   candidates.push_back(src_dir / ".." / "golden" / "vis" / name);
   candidates.push_back(std::filesystem::current_path() / rel);
-  for (auto dir = std::filesystem::current_path(); dir.has_parent_path();
-       dir = dir.parent_path()) {
+  // Walk from the cwd up to the filesystem root (inclusive), then stop.
+  // `std::filesystem::path("/").parent_path()` is itself "/" — a
+  // `dir.has_parent_path()` guard here looped forever once the walk reached
+  // the root, so every check_golden() call in this binary hung (the wave
+  // golden test was the recorded SIGTERM victim) until the 90s test timeout.
+  for (auto dir = std::filesystem::current_path();;) {
     candidates.push_back(dir / rel);
+    const auto parent = dir.parent_path();
+    if (parent.empty() || parent == dir) {
+      break;
+    }
+    dir = parent;
   }
   for (const auto& p : candidates) {
     if (std::filesystem::exists(p)) {
@@ -434,11 +443,15 @@ TEST_CASE("stereo driver reads and renders stereo samples") {
   std::uint64_t frame = 0;
   driver->tick(ctx, frame, {});
   REQUIRE(calls == 1);
-  // A second tick within the kTickAnalyze window must not re-pull.
-  driver->tick(tick_ctx(t0), frame, {});
+  // A second tick within the kTickAnalyze window must not re-pull. The same
+  // ctx is reused so the stereo tap stays attached — a fresh tick_ctx would
+  // drop stereo_samples_into and sample() would skip the windowed pull below.
+  ctx.now = t0;
+  driver->tick(ctx, frame, {});
   REQUIRE(calls == 1);
-  // Past the window it re-pulls.
-  driver->tick(tick_ctx(t0 + kTickAnalyze + std::chrono::milliseconds(1)), frame, {});
+  // Past the window it re-pulls (same ctx, now past the kTickAnalyze gate).
+  ctx.now = t0 + kTickAnalyze + std::chrono::milliseconds(1);
+  driver->tick(ctx, frame, {});
   REQUIRE(calls == 2);
 
   CellGrid grid(kRows, kCols);

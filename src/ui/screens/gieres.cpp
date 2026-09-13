@@ -367,8 +367,13 @@ GieresModel GieresModel::for_host(std::string_view base_url) {
   // client's fetch methods are deliberately non-const, and a by-value capture
   // is const inside a non-mutable lambda (a mutable lambda still converts to
   // std::function).
-  const auto make_hooks = [](const std::string& base) {
-    GieresClient client(base);
+  //
+  // Both endpoint clients share ONE disk cache (the cap then accounts the
+  // whole "gieres" namespace together; keys embed the endpoint base, so the
+  // LAN and public URLs never alias).
+  const auto make_hooks = [](const std::string& base,
+                             std::shared_ptr<foundation::DiskCache> cache) {
+    GieresClient client(base, std::move(cache));
     return GieresFallbackHooks{
         .base = base,
         .orgonity =
@@ -389,20 +394,21 @@ GieresModel GieresModel::for_host(std::string_view base_url) {
     };
   };
   const std::string primary{base_url};
-  // The published build defaults to the public domain (config.hpp), so the
-  // sticky fallback goes the other way — the author's LAN server
-  // (docs/orgonity-api.md), the fastest route for machines on that network.
-  // A transport error on the chosen base flips fetches to the other endpoint
-  // and they stick there for the session (pump() adopts it into base_url_).
-  const std::string fallback{"http://192.168.1.154:13080"};
-  auto hooks = make_hooks(primary);
+  // The public domain (docs/orgonity-api.md §1 — same Rails server) is the
+  // sticky fallback for the LAN: off the home network the LAN base only
+  // times out, so a transport error flips fetches to the public endpoint and
+  // they stick there for the session (pump() adopts it into base_url_).
+  const std::string fallback{"https://gieres.cytr.us"};
+  const auto cache = std::make_shared<foundation::DiskCache>();
+  auto hooks = make_hooks(primary, cache);
   if (fallback == primary) {
     return GieresModel(std::move(hooks.orgonity), std::move(hooks.by_date),
                        std::move(hooks.segments), std::move(hooks.now_playing),
                        base_url);
   }
   const auto active = std::make_shared<GieresActiveBase>();
-  hooks = gieres_with_fallback(std::move(hooks), make_hooks(fallback), active);
+  hooks = gieres_with_fallback(std::move(hooks), make_hooks(fallback, cache),
+                               active);
   // Built as a prvalue: GieresModel is non-copyable (fetch thread + deleted
   // copy ctor), so the return object must be constructed in place.
   return GieresModel(std::move(hooks.orgonity), std::move(hooks.by_date),
@@ -867,12 +873,15 @@ void GieresModel::pump() {
       if (org_view_ == OrgView::Day) {
         day_ = result->day;
       } else if (result->append) {
-        // Lazy page load: merge the broadcasts; page_/total_pages_/dates_
-        // refresh from the listing (dates_ is complete on every page).
+        // Lazy page load: merge the broadcasts. page_ advances by the
+        // REQUESTED page (the request defines the next lazy page — the
+        // response's page field may echo the server's own count, and tests
+        // feed canned fixtures that never advance it); the rest refreshes
+        // from the listing (dates_ is complete on every page).
         recordings_.insert(recordings_.end(),
                            result->listing.broadcasts.begin(),
                            result->listing.broadcasts.end());
-        page_        = result->listing.page;
+        page_        = requested_page_;
         total_pages_ = result->listing.total_pages;
         total_count_ = result->listing.total_count;
         if (dates_.empty()) {
@@ -1624,7 +1633,11 @@ bool GieresModel::handle_key(const std::string_view key) {
         fetch();
       }
       org_view_ = OrgView::Dates;
-      cursor_   = 0;
+      // Land the cursor on the NEWEST date: the index opens on the day the
+      // archive most recently reached (the Echelon calendar's "shown day"
+      // equivalent) — with the ascending recording_dates list the newest
+      // date is the last row.
+      cursor_   = dates_.empty() ? 0 : static_cast<int>(dates_.size()) - 1;
       scroll_   = 0;
       normalize();
     } else if (org_view_ == OrgView::Dates) {

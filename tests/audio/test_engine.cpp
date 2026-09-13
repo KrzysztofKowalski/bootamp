@@ -10,8 +10,11 @@
 //   * stop: the destructor (closed_ + stop_token) unblocks a fill thread
 //     waiting on a full ring and joins cleanly
 // Timing is orchestrated through a controllable stub source (serve -> stall
-// -> release -> serve data2 -> EOF), so no wall-clock sleep is load-bearing
-// for correctness: every assertion holds for any interleaving.
+// -> release -> serve data2 -> EOF). Waits on the fill thread's progress
+// yield and run against a hard deadline: sleeps only gate when an expected
+// state is observed, never the values asserted, so the tests stay
+// deterministic under fair scheduling while a genuinely broken LivePrefetch
+// still fails at the deadline instead of hanging.
 #include "audio/engine.hpp"
 #include "audio/ffmpeg_pipe.hpp"
 #include "audio/live_prefetch.hpp"
@@ -134,24 +137,35 @@ TEST_CASE("LivePrefetch: short read yields silence without blocking",
     // Release the source: the fill thread hits EOF. Consumers first drain the
     // 64 buffered frames — n = min(256, 64) = 64, so the fade-in (i/64) and
     // the tail fade-out ((63-i)/64) ramps overlap exactly — then observe
-    // (0, false).
+    // (0, false). The burst becomes observable only once the fill thread has
+    // set done_: fill writes the 64 frames into the ring (live_prefetch.cpp
+    // write path) before it can observe the stub's {0,false}, and while
+    // buffering leaves available < resumeAt the consumer serves silence
+    // without touching r_, so the ring cannot be drained early — in a correct
+    // implementation data strictly precedes (0, false). A fixed iteration
+    // count with no yield was race-prone under -j8: the whole budget once
+    // burned on silence before the fresh jthread got a scheduling slice
+    // (REQUIRE(saw_data) failed with the consumer never having observed
+    // done_). Wait for one of the two terminal states with a hard deadline
+    // instead: yielding lets a runnable fill thread make progress, and a
+    // genuinely broken LivePrefetch fails cleanly at the deadline rather than
+    // hanging the test.
     src->release();
 
     bool saw_data = false;
     bool eof = false;
-    for (int i = 0; i < 1000 && !eof; ++i) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!eof && std::chrono::steady_clock::now() < deadline) {
       std::array<Frame, 256> dst{};
       const auto [n, ok] = pf.stream(dst);
       if (!ok) {
         REQUIRE(n == 0);
-        REQUIRE(saw_data);
+        REQUIRE(saw_data);  // data must have been served before EOF
         eof = true;
         break;
       }
       REQUIRE(n == 256);
-      if (saw_data) {
-        continue;  // everything after the data call is silence
-      }
       bool has_data = false;
       for (const Frame& f : dst) {
         has_data = has_data || !is_silent(f);
@@ -167,6 +181,15 @@ TEST_CASE("LivePrefetch: short read yields silence without blocking",
         for (std::size_t i = 64; i < 256; ++i) {
           REQUIRE(is_silent(dst[i]));  // zeroed tail
         }
+        // Once the burst is served the ring is empty and done_ is true, so the
+        // next call is (0, false) from pure consumer-side state — no further
+        // fill-thread progress is involved, and nothing can starve it.
+      } else if (!saw_data) {
+        // Silence: done_ is not visible yet, so the data burst has not been
+        // released. Yield so the runnable fill thread gets CPU even under
+        // scheduler starvation; the deadline above is the fail-safe bound
+        // (a genuinely broken LivePrefetch fails here instead of hanging).
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     }
     REQUIRE(saw_data);
@@ -969,8 +992,11 @@ TEST_CASE("EngineTests: play PCM buffer through NullSink", "[audio][engine]") {
     REQUIRE(engine.seek(-1000.0).empty());
     REQUIRE(engine.position_secs() == 0.0);
 
-    // Positive offset lands at the exact frame.
-    REQUIRE(engine.seek(1000.0).empty());
+    // Positive offset lands at the exact frame. seek() takes RELATIVE seconds
+    // (Go Player.Seek(time.Duration) -> relativeSeekSample: pos + d), so the
+    // 1000-frame target is expressed as 1000/44100 s; a raw 1000.0 would be
+    // 1000 seconds past the clamp-to-0 position and overshoot to len-1.
+    REQUIRE(engine.seek(1000.0 / 44100.0).empty());
     REQUIRE(engine.position_secs() == Catch::Approx(1000.0 / 44100.0));
 
     // Overshoot past the end clamps to len-1 (Go: min(round(...), len-1)).

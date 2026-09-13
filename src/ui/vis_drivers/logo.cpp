@@ -173,13 +173,14 @@ public:
   void tick(const VisTickContext&, std::uint64_t&, std::span<const float>) override {}
 
   std::chrono::milliseconds tick_interval(const VisTickContext& ctx) const override {
-    // Go registers the logo via newRenderOnlyDriver, so tick_interval falls
-    // through to defaultDriverTickInterval: fast while playing, slow under
-    // an overlay or when stopped.
+    // Go registers the logo via newRenderOnlyDriver (tickDuration 0), so
+    // tick_interval falls through to defaultDriverTickInterval: while playing
+    // the default-driver cadence is kTickSpectrum (Go TickFast = 50 ms); slow
+    // under an overlay or when stopped.
     if (ctx.overlay_active || !ctx.playing) {
       return kTickSlow;
     }
-    return kTickFast;
+    return kTickSpectrum;
   }
 };
 

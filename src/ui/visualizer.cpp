@@ -433,20 +433,17 @@ bool Visualizer::render(CellGrid& grid) const {
 }
 
 std::chrono::milliseconds Visualizer::tick_interval(const VisTickContext& ctx) const {
-  // cliamp TickInterval: no driver -> slow; paused -> slow; otherwise the
-  // driver's own cadence.
+  // cliamp Visualizer.TickInterval (visualizer.go TickInterval: no driver ->
+  // slow; paused -> slow; otherwise the driver's own cadence). The fully-idle
+  // cadence (kTickIdle) is the app wiring's job, not this method's: Go applies
+  // TickIdle in model.tickInterval (isFullyIdle), and the bootamp TickLoop
+  // idles while ctx.focused is false — a paused visualizer stays at the slow
+  // cadence whether or not its content has settled.
   const VisDriver* driver = read_driver(drivers_, mode_);
   if (!driver) {
     return kTickSlow;
   }
   if (ctx.paused) {
-    // cliamp model.tickInterval: once the paused visualizer's content has
-    // fully decayed to rest (no band content left to ease down), drop to the
-    // fully-idle cadence (TickIdle); while decay is still pending keep the
-    // slow cadence so the bars fall smoothly.
-    if (!paused_decay_pending(ctx)) {
-      return kTickIdle;
-    }
     return kTickSlow;
   }
   return driver->tick_interval(ctx);

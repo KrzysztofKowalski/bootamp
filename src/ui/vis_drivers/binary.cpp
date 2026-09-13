@@ -7,8 +7,8 @@
 // position hash gated by a per-band probability (1s on high-energy bands glow
 // bright; 0s stay dim); scrolling is time-independent — the per-column scroll
 // offset from the frame counter creates the motion. Render-only driver; the
-// framework drives analysis + smoothing; cadence is the default (kTickFast
-// while playing, kTickSlow otherwise).
+// framework drives analysis + smoothing; cadence is the default driver
+// interval (kTickSpectrum while playing, kTickSlow otherwise).
 #include "ui/vis_drivers/registry.hpp"
 
 #include "ui/styles.hpp"

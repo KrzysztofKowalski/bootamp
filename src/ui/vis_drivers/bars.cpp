@@ -121,12 +121,14 @@ public:
             std::span<const float>) override {}
 
   std::chrono::milliseconds tick_interval(const VisTickContext& ctx) const override {
-    // Go model.tickInterval: band/spectrum modes run at TickFast (50ms =
-    // kTickSpectrum) while playing; slow when stopped or under an overlay.
+    // Go registers Bars via newFastRenderOnlyDriver(..., TickAnim, ...):
+    // 16ms (kTickFast) while playing; slow when stopped or under an overlay.
+    // (The model-level TickFast floor while audio plays is the app wiring's
+    // job per the TickLoop contract — not this driver's cadence.)
     if (ctx.overlay_active || !ctx.playing) {
       return kTickSlow;
     }
-    return kTickSpectrum;
+    return kTickFast;
   }
 };
 

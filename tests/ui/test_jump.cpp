@@ -53,7 +53,8 @@ TEST_CASE("jump hh:mm:ss parses to seconds", "[screens][jump]") {
 
 TEST_CASE("jump clock variants match Go table", "[screens][jump]") {
   // Go jump_test.go success rows: "58:05"→3485, "58:6"→3486, "58:"→3480,
-  // "  12:3  "→723, "2:3:4"→7394, "1::03"→3603, "1:02:"→3720.
+  // "  12:3  "→723, "2:3:4"→7384 (Go "hours one-digit parts"; the table at
+  // cliamp jump_test.go:25 is 2h3m4s), "1::03"→3603, "1:02:"→3720.
   const auto expect = [](std::string query, double want) {
     JumpModel m;
     double jumped = -1.0;
@@ -68,7 +69,7 @@ TEST_CASE("jump clock variants match Go table", "[screens][jump]") {
   expect("58:6", 3486.0);
   expect("58:", 3480.0);
   expect("  12:3  ", 723.0);
-  expect("2:3:4", 7394.0);
+  expect("2:3:4", 7384.0);
   expect("1::03", 3603.0);
   expect("1:02:", 3720.0);
 }

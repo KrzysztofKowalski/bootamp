@@ -6,9 +6,9 @@
 // levels are linearly resampled to the active column count
 // (classicPeakColsForWidth), each row shades the fractional fill within its
 // [rowBottom, rowTop] span, and the whole line carries the spectrum color of
-// its row-bottom tier (Go specWrap). Render-only driver; cadence is kTickAnim
-// while playing (cliamp newFastRenderOnlyDriver(..., TickAnim, ...)) — the
-// classic-peak layout animates at the ~30 FPS animation cadence.
+// its row-bottom tier (Go specWrap). Render-only driver; cadence is kTickFast
+// while playing (cliamp newFastRenderOnlyDriver(..., TickAnim, 16ms = the C++
+// fast tier)).
 #include "ui/vis_drivers/registry.hpp"
 
 #include "ui/styles.hpp"
@@ -151,11 +151,9 @@ public:
   void tick(const VisTickContext&, std::uint64_t&, std::span<const float>) override {}
 
   std::chrono::milliseconds tick_interval(const VisTickContext& ctx) const override {
-    // Go model.tickInterval: band/spectrum modes run at TickFast (50ms =
-    // kTickSpectrum) while playing; slow when stopped or under an overlay.
-    if (ctx.playing && !ctx.overlay_active) {
-      return kTickSpectrum;
-    }
+    // Go registers Ascii via newFastRenderOnlyDriver(..., TickAnim, ...):
+    // 16ms (kTickFast, the C++ fast tier) while playing; slow when stopped or
+    // under an overlay.
     if (ctx.overlay_active || !ctx.playing) {
       return kTickSlow;
     }

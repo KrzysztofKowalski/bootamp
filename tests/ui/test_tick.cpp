@@ -121,7 +121,10 @@ TEST_CASE("Tick cadence constants match cliamp", "[tick][unit]") {
   REQUIRE(ui::kTickSlow.count() == 200);   // Go TickSlow
   REQUIRE(ui::kTickAnim.count() == 33);    // ~30 FPS (Go TickAnalyze)
   REQUIRE(ui::kTickWave.count() == 16);    // Go TickWave
-  REQUIRE(ui::kTickAnalyze.count() == 50); // FFT cadence (Go TickFast)
+  REQUIRE(ui::kTickAnalyze.count() == 33); // FFT cadence (Go TickAnalyze = 33ms)
+  // Go TickFast (50ms) is the playing cadence of the default
+  // defaultDriverTickInterval render-only drivers (kTickSpectrum here).
+  REQUIRE(ui::kTickSpectrum.count() == 50);
 }
 
 // Port of TestInitialTickUsesFastCadence: start renders the first frame

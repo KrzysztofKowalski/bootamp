@@ -97,13 +97,13 @@ public:
 
   std::chrono::milliseconds
   tick_interval(const VisTickContext& ctx) const override {
-    // Go model.tickInterval: band/spectrum modes run at TickFast (50ms =
-    // kTickSpectrum) while playing; slow when stopped or under an overlay.
+    // Go registers Mirror via newFastRenderOnlyDriver(..., TickAnim, ...):
+    // 16ms (kTickFast) while playing; slow when stopped or under an overlay.
     if (ctx.overlay_active) {
       return kTickSlow;
     }
     if (ctx.playing) {
-      return kTickSpectrum;
+      return kTickFast;
     }
     return kTickSlow;
   }

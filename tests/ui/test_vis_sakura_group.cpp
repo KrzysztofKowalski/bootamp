@@ -52,11 +52,17 @@ std::span<const float> span_of(const std::vector<float>& v) {
   return std::span<const float>(v);
 }
 
+// Counts cells that carry at least one Braille dot. Only dotted Braille
+// glyphs (U+2801..U+28FF) count: a pre-filled framework cell holds U+0020
+// space, which carries no Braille dot — the old `rune != U'⠀'` probe treated
+// a space cell as lit, so e.g. sakura's degenerate-size early return (grid
+// left at the space pre-fill) reported 1 "dot".
 std::size_t dot_cell_count(const CellGrid& grid) {
   std::size_t n = 0;
   for (int r = 0; r < grid.rows(); ++r) {
     for (int c = 0; c < grid.cols(); ++c) {
-      if (grid.at(r, c).rune != U'⠀') {  // any braille dot set
+      const char32_t rune = grid.at(r, c).rune;
+      if (rune > U'⠀' && rune <= U'⣿') {  // any braille dot set
         ++n;
       }
     }
@@ -97,7 +103,9 @@ void check_band_spec_interval(VisDriver& driver) {
   REQUIRE(spec.fft_size == 2048);
 
   VisTickContext ctx = playing_ctx();
-  REQUIRE(driver.tick_interval(ctx) == kTickFast);
+  // Go registers Sakura via newRenderOnlyDriver -> defaultDriverTickInterval:
+  // TickFast (50ms = kTickSpectrum) while playing.
+  REQUIRE(driver.tick_interval(ctx) == kTickSpectrum);
   ctx.playing = false;
   REQUIRE(driver.tick_interval(ctx) == kTickSlow);
   ctx.playing = true;
@@ -196,7 +204,9 @@ TEST_CASE("sand bass kick blows an overfull bed into particles, then settles") {
   // the driver un-settled until every particle has left the panel.
   auto driver = vis_drivers::make_sand_driver();
 
-  CellGrid grid(16, 5);
+  // 5 rows x 16 cols — the cliamp panel shape (v.Rows = 5, PanelWidth = 16,
+  // dot grid 20x32) the Go test this ports runs.
+  CellGrid grid(5, 16);
   const auto zeros = const_bands(0.0f);
   driver->render(span_of(zeros), 0, grid);  // establish 20x32 dot grid
   std::uint64_t frame = 0;
@@ -225,7 +235,7 @@ TEST_CASE("sand bass kick blows an overfull bed into particles, then settles") {
   REQUIRE(n < 30);  // settled well inside the safety TTL
 
   // The bed restarted empty: nothing left to render.
-  CellGrid out(16, 5);
+  CellGrid out(5, 16);
   driver->render(span_of(zeros), frame, out);
   REQUIRE(dot_cell_count(out) == 0);
 }
@@ -260,20 +270,22 @@ TEST_CASE("terrain render does not advance the buffer without a tick") {
 
 TEST_CASE("terrain tick scrolls the ridge left and writes new columns") {
   auto driver = vis_drivers::make_terrain_driver();
-  CellGrid grid(16, 5);
+  // 5 rows x 16 cols — the cliamp panel shape (v.Rows = 5, PanelWidth = 16,
+  // dot grid 20x32): row 4 is the bottom row and col 15 the rightmost cell.
+  CellGrid grid(5, 16);
   const auto zeros = const_bands(0.0f);
   driver->render(span_of(zeros), 0, grid);  // establish width
   std::uint64_t frame = 0;
 
   // Before any tick the buffer is empty: terrain height 0 keeps only the
   // bottom dot of each column lit.
-  CellGrid before(16, 5);
+  CellGrid before(5, 16);
   driver->render(span_of(zeros), frame, before);
   const char32_t bottom_dot_rune = before.at(4, 15).rune;
 
   ++frame;
   driver->tick(playing_ctx(), frame, span_of(const_bands(0.6f)));
-  CellGrid after1(16, 5);
+  CellGrid after1(5, 16);
   driver->render(span_of(zeros), frame, after1);
   // 0.6-height terrain fills the rightmost columns far above the ground dot
   // (cliamp: height 0.6 -> topDot ~7 of 20). The new rune is a strict
@@ -284,12 +296,12 @@ TEST_CASE("terrain tick scrolls the ridge left and writes new columns") {
   // and scrolls the first pair left: the frame content changes.
   ++frame;
   driver->tick(playing_ctx(), frame, span_of(const_bands(0.6f)));
-  CellGrid after2(16, 5);
+  CellGrid after2(5, 16);
   driver->render(span_of(zeros), frame, after2);
   REQUIRE(dump_grid(after1) != dump_grid(after2));
 
   // Rendering again without a tick must not advance (buffer preserved).
-  CellGrid after2b(16, 5);
+  CellGrid after2b(5, 16);
   driver->render(span_of(zeros), frame, after2b);
   REQUIRE(dump_grid(after2) == dump_grid(after2b));
 }

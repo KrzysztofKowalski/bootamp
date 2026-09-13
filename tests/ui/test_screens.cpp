@@ -23,6 +23,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cctype>
 #include <cstdint>
 #include <string>
 #include <thread>
@@ -655,8 +656,19 @@ TEST_CASE("help filter matches key and action case-insensitively",
   REQUIRE(m.count() < total);
   for (int i = 0; i < m.count(); ++i) {
     const HelpEntry& e = m.entry_at(i);
-    REQUIRE((e.key.find("volume") != std::string::npos ||
-             e.action.find("volume") != std::string::npos));
+    // Compare case-insensitively, mirroring the model (Go updateKeymapFilter
+    // lowercases both sides before Contains; the stored labels keep their Go
+    // casing — command_registry.go:82 Label is "Volume up/down").
+    std::string key    = e.key;
+    std::string action = e.action;
+    for (char& c : key) {
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    for (char& c : action) {
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    REQUIRE((key.find("volume") != std::string::npos ||
+             action.find("volume") != std::string::npos));
   }
 
   m.set_filter("QUIT");

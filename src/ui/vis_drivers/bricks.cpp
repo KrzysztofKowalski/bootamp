@@ -6,8 +6,8 @@
 // bars visualizer. A brick is drawn only when the band level exceeds the row's
 // threshold; the whole line carries the spectrum color of its row-bottom tier
 // (Go specWrap). Fast render-only driver: analysis + smoothing are driven by
-// the framework; tick() is a no-op and the cadence is kTickAnim while playing
-// (Go newFastRenderOnlyDriver with TickAnim).
+// the framework; tick() is a no-op and the cadence is kTickFast while playing
+// (Go newFastRenderOnlyDriver with TickAnim, 16ms = the C++ fast tier).
 #include "ui/vis_driver.hpp"
 
 #include "ui/styles.hpp"
@@ -91,12 +91,12 @@ public:
   void tick(const VisTickContext&, std::uint64_t&, std::span<const float>) override {}
 
   std::chrono::milliseconds tick_interval(const VisTickContext& ctx) const override {
-    // Go model.tickInterval: band/spectrum modes run at TickFast (50ms =
-    // kTickSpectrum) while playing; slow when stopped or under an overlay.
+    // Go registers Bricks via newFastRenderOnlyDriver(..., TickAnim, ...):
+    // 16ms (kTickFast) while playing; slow when stopped or under an overlay.
     if (ctx.overlay_active || !ctx.playing) {
       return kTickSlow;
     }
-    return kTickSpectrum;
+    return kTickFast;
   }
 };
 

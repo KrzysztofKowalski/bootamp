@@ -32,12 +32,17 @@ using bootamp::dsp::kDefaultSpectrumBands;
 namespace {
 
 // Count character cells that carry at least one Braille dot (Go
-// visualizer_driver_test.go's "any braille dot set" probe).
+// visualizer_driver_test.go's "any braille dot set" probe). Only dotted
+// Braille glyphs (U+2801..U+28FF) count: a pre-filled framework cell holds
+// U+0020 space, which carries no Braille dot — the old `rune != U'⠀'` probe
+// treated space cells as lit, so e.g. the untouched first render (framework
+// pre-fill = spaces) reported all 200 cells as lit.
 std::size_t lit_dot_count(const CellGrid& g) {
   std::size_t n = 0;
   for (int r = 0; r < g.rows(); ++r) {
     for (int c = 0; c < g.cols(); ++c) {
-      if (g.at(r, c).rune != U'⠀') {
+      const char32_t rune = g.at(r, c).rune;
+      if (rune > U'⠀' && rune <= U'⣿') {
         ++n;
       }
     }
@@ -90,7 +95,7 @@ TEST_CASE("the firework group drivers declare the default 10-band spec and caden
     REQUIRE(spec.fft_size == 2048);  // defaultFFTSize
     VisTickContext ctx;
     ctx.playing = true;
-    REQUIRE(d->tick_interval(ctx) == kTickFast);  // defaultDriverTickInterval
+    REQUIRE(d->tick_interval(ctx) == kTickSpectrum);  // defaultDriverTickInterval -> Go TickFast (50ms)
     ctx.playing = false;
     REQUIRE(d->tick_interval(ctx) == kTickSlow);
     ctx.playing = true;
@@ -242,7 +247,11 @@ TEST_CASE("scatter renders a golden blank layout for silence with band gaps") {
       line += ' ';
     }
   }
-  REQUIRE(line.size() == 40);
+  // 40 terminal columns = 31 blank-braille cells (3 UTF-8 bytes each) + 9
+  // inter-band spaces = 102 bytes; std::string::size() counts bytes, not
+  // codepoints, so the layout probe expects 102 (the dump comparison below
+  // pins the exact byte content).
+  REQUIRE(line.size() == 102);
   REQUIRE(dump_grid(quiet) == line + "\n" + line + "\n" + line + "\n" + line + "\n" + line);
   REQUIRE(lit_dot_count(quiet) == 0);
   REQUIRE(quiet.at(0, 0).color == kColorSpecHigh);

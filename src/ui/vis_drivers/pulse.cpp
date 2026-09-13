@@ -9,8 +9,8 @@
 // radial color gradient. Per-dot polar coordinates (distance + angle) are
 // cached per panel size (Go pulseCoords) so the hot render loop reads flat
 // arrays instead of calling ~3360 sqrt/atan2 per frame. Render-only driver:
-// the framework drives analysis + smoothing; cadence is the default
-// (kTickFast while playing, kTickSlow otherwise).
+// the framework drives analysis + smoothing; cadence is the default driver
+// interval (kTickSpectrum while playing, kTickSlow otherwise).
 #include "ui/vis_drivers/registry.hpp"
 
 #include "ui/styles.hpp"

@@ -68,11 +68,11 @@ void InfoModel::rebuild_lines() {
     field("Track", std::to_string(track_.track_number));
   }
   // bootamp addition over Go infoLines (the task spec lists duration; Go's
-  // overlay stops at Path). Formatted mm:ss like Go formatJumpClock — minutes
-  // may exceed 59 for long tracks.
+  // overlay stops at Path). Track durations render M:SS like Go
+  // formatTrackTime (view_helpers.go): minutes unpadded, seconds 2-digit.
   if (track_.duration_secs > 0) {
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "%02d:%02d", track_.duration_secs / 60,
+    std::snprintf(buf, sizeof(buf), "%d:%02d", track_.duration_secs / 60,
                   track_.duration_secs % 60);
     field("Duration", buf);
   }
