@@ -34,6 +34,12 @@ inline constexpr std::chrono::seconds kYtdlCauseGrace {3};
 void set_ytdl_cookies_from(std::string_view browser);
 std::string_view ytdl_cookies_from();
 
+// set_ytdl_user_agent configures yt-dlp --user-agent for playback (bootamp
+// addition, mirrors resolve's global so config ytmusic.user_agent reaches both
+// the resolve and the playback yt-dlp invocations). Empty = disable.
+void set_ytdl_user_agent(std::string_view ua);
+std::string_view ytdl_user_agent();
+
 // ytdlp_available reports whether yt-dlp is on PATH.
 bool ytdlp_available();
 

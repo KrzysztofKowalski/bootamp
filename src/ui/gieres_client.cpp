@@ -56,7 +56,23 @@ GieresBroadcast parse_broadcast(const nl::json& el) {
 
 }  // namespace
 
-GieresClient::GieresClient(std::string base_url) : base_(std::move(base_url)) {
+// Cache wiring: the HTTP bodies below ride a foundation::DiskCache under the
+// "gieres" namespace, keyed by the full request URL. TTLs follow how stale
+// each payload may be — archive listings and day windows are immutable for
+// years (5 min is a debounce, not a correctness gate); now-playing is a live
+// badge (30 s — an explicit ctrl+r within the TTL still sees the previous
+// title). A cache failure is a miss, never an error: the LAN fetch proceeds.
+inline constexpr std::string_view kCacheNamespace        = "gieres";
+inline constexpr std::int64_t     kArchiveCacheTtlSeconds = 300;
+inline constexpr std::int64_t     kNowPlayingCacheTtlSeconds = 30;
+
+GieresClient::GieresClient(std::string base_url)
+    : GieresClient(std::move(base_url),
+                   std::make_shared<foundation::DiskCache>()) {}
+
+GieresClient::GieresClient(std::string base_url,
+                           std::shared_ptr<foundation::DiskCache> cache)
+    : base_(std::move(base_url)), cache_(std::move(cache)) {
   while (!base_.empty() && base_.back() == '/') {
     base_.pop_back();
   }
@@ -71,6 +87,30 @@ std::string GieresClient::url(std::string_view path) const {
   return out;
 }
 
+std::expected<audio::HttpResponse, std::string>
+GieresClient::fetch_cached(const std::string_view path,
+                           const std::size_t max_bytes,
+                           const std::chrono::milliseconds timeout,
+                           const std::int64_t ttl_seconds) {
+  const std::string full = url(path);
+  // A fresh cached body (only 200s are ever stored) skips the LAN round-trip;
+  // a miss, an expired/corrupt entry or an unusable cache dir falls through
+  // to the real fetch. The cache accelerates reads — it never gates one.
+  if (auto hit = cache_->get(std::string{kCacheNamespace} + "/" + full)) {
+    audio::HttpResponse resp;
+    resp.status = 200;  // stored bodies are captured 200s; parse proceeds as
+    resp.body   = std::move(*hit);  // it would after a real fetch.
+    return resp;
+  }
+  auto resp = http_.fetch_text(full, max_bytes, timeout);
+  if (!resp || resp->status != 200) {
+    return resp;  // errors and non-200 stay uncached (the caller reports them)
+  }
+  (void)cache_->put(std::string{kCacheNamespace} + "/" + full, resp->body,
+                    ttl_seconds);
+  return resp;
+}
+
 std::expected<GieresListing, std::string>
 GieresClient::orgonity(const int page, const std::string_view q,
                        const std::string_view sort) {
@@ -81,8 +121,8 @@ GieresClient::orgonity(const int page, const std::string_view q,
   if (!sort.empty()) {
     path += "&sort=" + encode_query_component(sort);
   }
-  auto resp = http_.fetch_text(url(path), 1024 * 1024,
-                               std::chrono::seconds{10});
+  auto resp = fetch_cached(path, 1024 * 1024, std::chrono::seconds{10},
+                           kArchiveCacheTtlSeconds);
   if (!resp) {
     return std::unexpected(std::move(resp).error());
   }
@@ -98,7 +138,8 @@ GieresClient::by_date(const std::string_view date) {
   std::string path = "/orgonity/by_date/";
   path += encode_query_component(date);
   path += ".json";
-  auto resp = http_.fetch_text(url(path), 1024 * 1024, std::chrono::seconds{10});
+  auto resp = fetch_cached(path, 1024 * 1024, std::chrono::seconds{10},
+                           kArchiveCacheTtlSeconds);
   if (!resp) {
     return std::unexpected(std::move(resp).error());
   }
@@ -115,7 +156,8 @@ GieresClient::echelon_segments(const std::string_view start_iso,
   if (!end_iso.empty()) {
     path += "&end=" + encode_query_component(end_iso);
   }
-  auto resp = http_.fetch_text(url(path), 1024 * 1024, std::chrono::seconds{10});
+  auto resp = fetch_cached(path, 1024 * 1024, std::chrono::seconds{10},
+                           kArchiveCacheTtlSeconds);
   if (!resp) {
     return std::unexpected(std::move(resp).error());
   }
@@ -127,8 +169,8 @@ GieresClient::echelon_segments(const std::string_view start_iso,
 }
 
 std::expected<std::string, std::string> GieresClient::now_playing() {
-  auto resp = http_.fetch_text(url("/now-playing.json"), 64 * 1024,
-                               std::chrono::seconds{10});
+  auto resp = fetch_cached("/now-playing.json", 64 * 1024,
+                           std::chrono::seconds{10}, kNowPlayingCacheTtlSeconds);
   if (!resp) {
     return std::unexpected(std::move(resp).error());
   }

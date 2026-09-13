@@ -287,14 +287,45 @@ function(bootamp_test name srcs libs)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-bootamp_test(test_foundation "${TEST_FOUNDATION_SRCS}" "bootamp_foundation")
-bootamp_test(test_dsp        "${TEST_DSP_SRCS}"        "bootamp_dsp;bootamp_audio")
-bootamp_test(test_audio      "${TEST_AUDIO_SRCS}"      "bootamp_audio")
-bootamp_test(test_playlist  "${TEST_PLAYLIST_SRCS}"   "bootamp_playlist")
-bootamp_test(test_resolve    "${TEST_RESOLVE_SRCS}"    "bootamp_resolve;bootamp_audio")
-bootamp_test(test_provider   "${TEST_PROVIDER_SRCS}"   "bootamp_provider")
-bootamp_test(test_config     "${TEST_CONFIG_SRCS}"     "bootamp_config")
-bootamp_test(test_ui         "${TEST_UI_SRCS}"         "bootamp_ui;bootamp_config")
+# One small test executable per source file (instead of one aggregate binary per
+# area): a crash or hang now names its exact source file ([name] FAIL 139 /
+# TIMEOUT from scripts/test.sh) and runs in its own process, so the ~11.8GiB
+# UI-hang and the recurring test_audio SIGSEGV are isolated instead of taking
+# the whole area with them. The GLOBs keep CONFIGURE_DEPENDS, so a NEW test
+# .cpp added later becomes its own binary on the next reconfigure — no further
+# CMake edit needed. Binary name == file stem (Catch2WithMain supplies main).
+foreach(f IN LISTS TEST_FOUNDATION_SRCS)
+  get_filename_component(_stem "${f}" NAME_WE)
+  bootamp_test("${_stem}" "${f}" "bootamp_foundation")
+endforeach()
+foreach(f IN LISTS TEST_DSP_SRCS)
+  get_filename_component(_stem "${f}" NAME_WE)
+  bootamp_test("${_stem}" "${f}" "bootamp_dsp;bootamp_audio")
+endforeach()
+foreach(f IN LISTS TEST_AUDIO_SRCS)
+  get_filename_component(_stem "${f}" NAME_WE)
+  bootamp_test("${_stem}" "${f}" "bootamp_audio")
+endforeach()
+foreach(f IN LISTS TEST_PLAYLIST_SRCS)
+  get_filename_component(_stem "${f}" NAME_WE)
+  bootamp_test("${_stem}" "${f}" "bootamp_playlist")
+endforeach()
+foreach(f IN LISTS TEST_RESOLVE_SRCS)
+  get_filename_component(_stem "${f}" NAME_WE)
+  bootamp_test("${_stem}" "${f}" "bootamp_resolve;bootamp_audio")
+endforeach()
+foreach(f IN LISTS TEST_PROVIDER_SRCS)
+  get_filename_component(_stem "${f}" NAME_WE)
+  bootamp_test("${_stem}" "${f}" "bootamp_provider")
+endforeach()
+foreach(f IN LISTS TEST_CONFIG_SRCS)
+  get_filename_component(_stem "${f}" NAME_WE)
+  bootamp_test("${_stem}" "${f}" "bootamp_config")
+endforeach()
+foreach(f IN LISTS TEST_UI_SRCS)
+  get_filename_component(_stem "${f}" NAME_WE)
+  bootamp_test("${_stem}" "${f}" "bootamp_ui;bootamp_config")
+endforeach()
 
 # --- Benchmark (google-benchmark) -------------------------------------------
 find_package(benchmark QUIET)

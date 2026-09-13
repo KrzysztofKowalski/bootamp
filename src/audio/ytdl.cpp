@@ -24,8 +24,8 @@
 //     no zombies. Idempotent like Go's closeOnce.
 //   - probe_ytdlp_duration: Go probeYTDLDuration — "--skip-download
 //     --no-playlist --socket-timeout 10 --print duration [--cookies-from-
-//     browser B] <url>" with a 10s deadline, whole-string float parse,
-//     secs <= 0 ⇒ 0.
+//     browser B] [--user-agent UA] <url>" with a 10s deadline, whole-string
+//     float parse, secs <= 0 ⇒ 0.
 //
 // Seek is ffmpeg -ss INPUT-side restart: the engine rebuilds the pipeline
 // via build_ytdl_pipeline (engine.cpp seek_ytdl, generation-cancelled) —
@@ -161,6 +161,11 @@ std::string ffmpeg_install_hint() {
 
 // Global cookie-browser setting (Go: ytdlCookiesFrom, configured at startup).
 std::string g_ytdl_cookies;
+
+// Global yt-dlp User-Agent override (bootamp addition — Go has no equivalent;
+// mirrors resolve's global, both fed from config ytmusic.user_agent at
+// startup). Empty = unset → no --user-agent flag is emitted.
+std::string g_ytdl_ua;
 
 // Go os/exec wait-error formatting: "exit status N" | "signal: <name>".
 std::string wait_status_str(int status) {
@@ -339,6 +344,14 @@ std::string_view ytdl_cookies_from() {
   return g_ytdl_cookies;
 }
 
+void set_ytdl_user_agent(std::string_view ua) {
+  g_ytdl_ua = std::string(ua);
+}
+
+std::string_view ytdl_user_agent() {
+  return g_ytdl_ua;
+}
+
 bool ytdlp_available() {
   return look_path("yt-dlp");
 }
@@ -349,13 +362,17 @@ bool ytdlp_available() {
 
 std::chrono::duration<double> probe_ytdlp_duration(std::string_view page_url) {
   // "--skip-download --no-playlist --socket-timeout 10 --print duration
-  // [--cookies-from-browser B] <url>" — exact Go argv.
+  // [--cookies-from-browser B] [--user-agent UA] <url>" — exact Go argv.
   std::vector<std::string> args = {
       "yt-dlp", "--skip-download", "--no-playlist", "--socket-timeout", "10",
       "--print", "duration"};
   if (std::string_view cb = ytdl_cookies_from(); !cb.empty()) {
     args.push_back("--cookies-from-browser");
     args.push_back(std::string(cb));
+  }
+  if (std::string_view ua = ytdl_user_agent(); !ua.empty()) {
+    args.push_back("--user-agent");
+    args.push_back(std::string(ua));
   }
   args.push_back(std::string(page_url));
 
@@ -478,6 +495,10 @@ YtdlpPipeStreamer::decode_ytdlp_pipe(std::string_view page_url, int sr, int bit_
   if (std::string_view cb = ytdl_cookies_from(); !cb.empty()) {
     ytdl_args.push_back("--cookies-from-browser");
     ytdl_args.push_back(std::string(cb));
+  }
+  if (std::string_view ua = ytdl_user_agent(); !ua.empty()) {
+    ytdl_args.push_back("--user-agent");
+    ytdl_args.push_back(std::string(ua));
   }
   ytdl_args.push_back(std::string(page_url));
 

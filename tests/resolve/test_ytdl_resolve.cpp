@@ -5,8 +5,9 @@
 // plus recorded --flat-playlist JSON fixtures (as string constants) covering
 // the field fallbacks of cliamp resolve.go parseYTDLTracks.
 //
-// The subprocess path (resolve_ytdl) is not exercised here: it requires a real
-// yt-dlp on PATH. JSON parsing and classification are pure and fully tested.
+// The subprocess argv path is exercised via a fake yt-dlp shadowed onto PATH
+// (echoes its argv to a log); JSON parsing, classification, and argv assembly
+// are fully tested without a real yt-dlp.
 
 #include "playlist/playlist.hpp"
 #include "resolve/resolve.hpp"  // set_ytdl_cookies_from / ytdl_cookies_from
@@ -266,9 +267,12 @@ TEST_CASE("resolve_ytdl builds the exact yt-dlp argument list", "[resolve][ytdl]
 
   const char* old_path = std::getenv("PATH");
   const EnvGuard path_guard("PATH", tmp.string() + ":" + (old_path ? old_path : ""));
-  // Cookies must not leak between cases (Go t.Cleanup(SetYTDLCookiesFrom(""))).
+  // Cookies/UA must not leak between cases (Go t.Cleanup(SetYTDLCookiesFrom(""))).
   struct CookiesRestore {
-    ~CookiesRestore() { bootamp::resolve::set_ytdl_cookies_from(""); }
+    ~CookiesRestore() {
+      bootamp::resolve::set_ytdl_cookies_from("");
+      bootamp::resolve::set_ytdl_user_agent("");
+    }
   } cookies_restore;
 
   // 1. Bounded resolve, no cookies: flags then bounds then URL.
@@ -326,4 +330,41 @@ TEST_CASE("resolve_ytdl builds the exact yt-dlp argument list", "[resolve][ytdl]
         "--socket-timeout\n"
         "15\n"
         "https://example.com/playlist\n");
+
+  // 5. Global user-agent (bootamp addition): emitted after cookies, before
+  //    the bounds/URL. Empty global ⇒ no --user-agent flag.
+  bootamp::resolve::set_ytdl_user_agent("bootamp-test-ua");
+  const auto r5 = bootamp::resolve::resolve_ytdl_with_bounds("https://example.com/playlist", 1, 2);
+  REQUIRE(r5.has_value());
+  CHECK(read_file(log) ==
+        "--flat-playlist\n"
+        "-j\n"
+        "--socket-timeout\n"
+        "15\n"
+        "--user-agent\n"
+        "bootamp-test-ua\n"
+        "--playlist-start\n"
+        "2\n"
+        "--playlist-end\n"
+        "2\n"
+        "https://example.com/playlist\n");
+  bootamp::resolve::set_ytdl_user_agent("");
+
+  // 6. Cookies + UA together: cookies first, UA second, then bounds.
+  bootamp::resolve::set_ytdl_cookies_from("brave");
+  bootamp::resolve::set_ytdl_user_agent("ua-2");
+  const auto r6 = bootamp::resolve::resolve_ytdl("https://example.com/playlist");
+  REQUIRE(r6.has_value());
+  CHECK(read_file(log) ==
+        "--flat-playlist\n"
+        "-j\n"
+        "--socket-timeout\n"
+        "15\n"
+        "--cookies-from-browser\n"
+        "brave\n"
+        "--user-agent\n"
+        "ua-2\n"
+        "https://example.com/playlist\n");
+  bootamp::resolve::set_ytdl_cookies_from("");
+  bootamp::resolve::set_ytdl_user_agent("");
 }

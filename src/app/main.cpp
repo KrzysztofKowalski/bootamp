@@ -47,6 +47,7 @@
 
 #include "audio/audio_sink.hpp"
 #include "audio/engine.hpp"
+#include "audio/ytdl.hpp"  // set_ytdl_cookies_from / set_ytdl_user_agent
 #include "config/config.hpp"
 #include "config/gieres_overrides.hpp"
 #include "dsp/spectrum.hpp"
@@ -74,6 +75,7 @@
 #include "ui/screens/pl_picker.hpp"
 #include "ui/screens/queue.hpp"
 #include "ui/screens/url.hpp"
+#include "ui/screens/yt.hpp"
 #include "ui/styles.hpp"
 #include "ui/tick.hpp"
 #include "ui/visualizer.hpp"
@@ -748,6 +750,13 @@ resolve_pending(const std::vector<std::string>& pending) {
         std::unexpected("no resolver");
     if (playlist::is_ytdl(url)) {
       got = resolve::resolve_ytdl(url);
+      // yt-dlp exiting 0 with zero --flat-playlist lines is not a clean
+      // result (deleted/private/region-blocked video, empty search): surface
+      // it as an error instead of dead silence at the caller. Only ytdl URLs
+      // are affected — the resume/history paths do not flow through here.
+      if (got && got->empty()) {
+        got = std::unexpected("yt-dlp resolved no tracks for " + url);
+      }
     } else if (playlist::is_feed(url)) {
       foundation::applog::user_warn(
           "skipping feed URL (not yet supported): {}", url);
@@ -1027,6 +1036,7 @@ enum class UiMode : std::uint8_t {
   Help,         // keybinding help (? / h / ctrl+k)
   DevicePicker, // audio device picker (d)
   Gieres,       // Giereś archive browser (p)
+  Yt,           // YouTube browser (y)
 };
 
 // ScreenRefs bundles the screen models + the active mode so the shell's
@@ -1051,6 +1061,9 @@ struct ScreenRefs {
   // Full-screen Gieres archive browser (p): Giereś's Radio Radio archive —
   // live stream, orgonity recordings, echelon timeline (docs/orgonity-api.md).
   ui::screens::GieresModel&       gieres;
+  // Full-screen YouTube browser (y): search / playlists / video-list feeds
+  // through resolve::resolve_ytdl (the gieres screen pattern).
+  ui::screens::YtModel&           yt;
   // Local-provider browse ('L'): local_browse is the second BrowseModel
   // (nullptr when the local provider is unavailable — browse_local is then
   // never set); browse_local selects which model the Browse mode drives.
@@ -1084,6 +1097,11 @@ void set_screen(ScreenRefs& s, UiMode next, ui::FtxuiAppImpl* shell) {
     // Entering the archive kicks the pending first fetches (the model is
     // idempotent — already-fetched views stay put).
     s.gieres.open();
+  } else if (next == UiMode::Yt) {
+    // Entering the YouTube browser kicks the pending first fetch (the model
+    // is idempotent — loaded lists stay put; the resumed target fetches on
+    // the first open, possibly from the disk cache).
+    s.yt.open();
   }
   // EqOverlay needs no entry work. Leaving a screen is the models' business
   // where they own a close key (queue/help close on esc); app_key detects the
@@ -1272,6 +1290,17 @@ void app_key(std::string_view key, PlaybackController& ctl,
         return;
       }
       break;
+    case UiMode::Yt:
+      // The YouTube browser consumes its own keys and falls through the rest
+      // like the archive: y toggles it closed, space play/pause, and the
+      // player keys (volume/skip/repeat/...) reach the global table.
+      if (s.yt.handle_key(key)) {
+        if (!s.yt.visible()) {
+          set_screen(s, UiMode::Vis, shell);  // esc walked out of the screen
+        }
+        return;
+      }
+      break;
     case UiMode::Vis:
       break;
   }
@@ -1425,6 +1454,13 @@ void app_key(std::string_view key, PlaybackController& ctl,
     // screen model deliberately does not consume p while it is open, so the
     // same key toggles it closed (DevicePicker-style).
     next = s.mode == UiMode::Gieres ? UiMode::Vis : UiMode::Gieres;
+  } else if (key == "y") {
+    // YouTube browser (bootamp; not a Go key — lowercase y so the screen's
+    // own 'a' stays the append key). The model deliberately does not consume
+    // y while it is open, so the same key toggles it closed (DevicePicker-
+    // style, like p above). 'Y' (shift) keeps the Go YouTube net search in
+    // the browse screen.
+    next = s.mode == UiMode::Yt ? UiMode::Vis : UiMode::Yt;
   } else if (key == "esc") {
     next = UiMode::Vis;
   } else {
@@ -1547,12 +1583,20 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
   }
 
   // 4. yt-dlp settings from config (cliamp main.go: ExpandYTPlaylist +
-  //    SetYTDLCookiesFrom).
+  //    SetYTDLCookiesFrom). Cookies AND user-agent are mirrored to BOTH the
+  //    resolve side (--flat-playlist -j) and the audio side (pipe + probe);
+  //    before the audio::set_ytdl_cookies_from fix, playback yt-dlp ran
+  //    without cookies even though --cookies-from-browser was configured.
   if (cfg_ref.ytmusic.expand_playlist) {
     resolve::set_expand_yt_playlist(*cfg_ref.ytmusic.expand_playlist);
   }
   if (!cfg_ref.ytmusic.cookies_from.empty()) {
     resolve::set_ytdl_cookies_from(cfg_ref.ytmusic.cookies_from);
+    audio::set_ytdl_cookies_from(cfg_ref.ytmusic.cookies_from);
+  }
+  if (!cfg_ref.ytmusic.user_agent.empty()) {
+    resolve::set_ytdl_user_agent(cfg_ref.ytmusic.user_agent);
+    audio::set_ytdl_user_agent(cfg_ref.ytmusic.user_agent);
   }
 
   // 5. Providers (cliamp main.go): radio always; local when the config dir
@@ -1973,11 +2017,32 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
     return gieres_model.echelon_resolve_end(ended_path, out);
   };
 
+  // YouTube browser (y): the real resolve hook (resolve::resolve_ytdl — the
+  // same resolver the browse net-search uses) + the on-disk list cache (a
+  // foundation::DiskCache wired inside for_host). Playback wiring mirrors the
+  // browse net-search enter/append paths: each listed track is already a full
+  // resolve_ytdl result (video URL, title, uploader, duration), so the host
+  // only appends + plays it.
+  ui::screens::YtModel yt_model = ui::screens::YtModel::for_host();
+  ui::screens::YtActions yt_actions;
+  yt_actions.on_play_track = [&ctl, &pl](const playlist::Track& t) {
+    // YT enter: append + play (Go handleNetSearchResultsKey enter parity) —
+    // the play start runs async on the play worker.
+    const int idx = pl.len();
+    pl.add({t});
+    pl.set_index(idx);
+    ctl.play_track(t);
+  };
+  yt_actions.on_append_track = [&pl](const playlist::Track& t) {
+    pl.add({t});  // YT a: append only, playback keeps running
+  };
+  yt_model.set_actions(std::move(yt_actions));
+
   bool browse_local = false;
   ScreenRefs screen_refs{ui_mode,      queue_model, browse_model,
                          eq_model,     help_model,  device_model,
                          url_model,    jump_model,  info_model,
-                         pl_picker_model, gieres_model,
+                         pl_picker_model, gieres_model, yt_model,
                          local_browse_model.get(),
                          browse_local};
 
@@ -2056,11 +2121,12 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
     auto info_comp = ui::screens::make_info_component(info_model);
     auto pl_picker_comp = ui::screens::make_pl_picker_component(pl_picker_model);
     auto gieres_comp = ui::screens::make_gieres_component(gieres_model);
+    auto yt_comp = ui::screens::make_yt_component(yt_model);
     auto screens_overlay = ftxui::Renderer(
         [&ui_mode, &url_model, &jump_model, &info_model, &pl_picker_model,
-         &gieres_model, queue_comp, browse_comp, eq_comp, help_comp,
+         &gieres_model, &yt_model, queue_comp, browse_comp, eq_comp, help_comp,
          device_comp, url_comp, jump_comp, info_comp, pl_picker_comp,
-         gieres_comp]() -> ftxui::Element {
+         gieres_comp, yt_comp]() -> ftxui::Element {
           // Inline overlays (url/jump/info/playlist picker) render above
           // everything while active (Go inline_overlays.go).
           if (url_model.active()) {
@@ -2088,6 +2154,8 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
               return device_comp->Render();
             case UiMode::Gieres:
               return gieres_comp->Render();
+            case UiMode::Yt:
+              return yt_comp->Render();
             case UiMode::Vis:
               break;
           }
@@ -2097,8 +2165,8 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
     // Keep the screens' scroll windows sized to the terminal (invoked from
     // document() on the loop thread each repaint, so resizes are live).
     app_impl->set_resize_hook([&queue_model, &browse_model, &help_model,
-                               &device_model, &gieres_model](int /*cols*/,
-                                                             int rows) {
+                               &device_model, &gieres_model,
+                               &yt_model](int /*cols*/, int rows) {
       const int avail = std::max(rows - 2, 0);  // status + help lines
       queue_model.set_visible_rows(avail);
       // Browse keeps the vis strip alive under the station list like gieres:
@@ -2117,18 +2185,23 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
       // exactly instead of overflowing by the chrome rows.
       gieres_model.set_visible_rows(std::max(
           avail - 4 - ui::FtxuiApp::screen_vis_rows(rows), 0));
+      // The YouTube browser keeps the visualizer alive below its list like
+      // gieres (same chrome + reserved-vis policy).
+      yt_model.set_visible_rows(std::max(
+          avail - 4 - ui::FtxuiApp::screen_vis_rows(rows), 0));
     });
   }
 #endif  // BOOTAMP_HAS_FTXUI
 
   // 12b. Reopen the panel the last session left open (bootamp resume): the
-  //      Gieres archive (p) with its tab, or the radio browse (R). set_screen
+  //      Gieres archive (p) with its tab, the radio browse (R), or the YouTube
+  //      browser (y) with its view + last target + cursor. set_screen
   //      performs the per-screen entry work (the first fetches / the provider
   //      refresh) exactly like the key that opens the screen, and flips the
   //      shell's screen-visible flag so the frame opens on the panel. The
-  //      Gieres tab is set first: open() kicks the fetch for the current view
-  //      state. Nothing plays from the panel here — the source restarts in
-  //      step 13 when the state carried one.
+  //      Gieres tab / YouTube target are set first: open() kicks the fetch
+  //      for the current state. Nothing plays from the panel here — the
+  //      source restarts in step 13 when the state carried one.
   if (resumed.screen == "gieres") {
     if (resumed.screen_tab == "orgonity") {
       gieres_model.set_view(ui::screens::GieresModel::View::Orgonity);
@@ -2140,6 +2213,11 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
     set_screen(screen_refs, UiMode::Gieres, app_impl);
   } else if (resumed.screen == "radio") {
     set_screen(screen_refs, UiMode::Browse, app_impl);
+  } else if (resumed.screen == "yt") {
+    // YouTube browser: restore view + last target + cursor; the disk cache
+    // serves the stored list back without a refetch while its TTL survives.
+    yt_model.restore_tab(resumed.screen_tab);
+    set_screen(screen_refs, UiMode::Yt, app_impl);
   }
 
   // 13. Start playback (cliamp ui/model/init.go autoPlayMsg). The TUI starts
@@ -2259,11 +2337,13 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
   // buffering window is settled.
   //
   // The open panel (bootamp-only state): the Gieres archive (p) with its
-  // active tab, or the radio browse (R / b) — the main vis frame records "".
-  // (The local-provider browse 'L' drives the same Browse mode and records
-  // as "radio" too.)
-  std::string screen;      // "" | "gieres" | "radio"
-  std::string screen_tab;  // gieres tab: "live" | "orgonity" | "echelon"
+  // active tab, the YouTube browser (y) with its view + target + cursor, or
+  // the radio browse (R / b) — the main vis frame records "". (The
+  // local-provider browse 'L' drives the same Browse mode and records as
+  // "radio" too.)
+  std::string screen;      // "" | "gieres" | "yt" | "radio"
+  std::string screen_tab;  // gieres tab: "live" | "orgonity" | "echelon";
+                           // yt: resume_tab() "view\x1etarget\x1ecursor"
   if (ui_mode == UiMode::Gieres && gieres_model.visible()) {
     screen = "gieres";
     switch (gieres_model.view()) {
@@ -2277,6 +2357,9 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
         screen_tab = "echelon";
         break;
     }
+  } else if (ui_mode == UiMode::Yt && yt_model.visible()) {
+    screen     = "yt";
+    screen_tab = yt_model.resume_tab();
   } else if (ui_mode == UiMode::Browse) {
     screen = "radio";
   }

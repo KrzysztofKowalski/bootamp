@@ -11,8 +11,11 @@
 #pragma once
 
 #include "audio/http_socket.hpp"
+#include "foundation/disk_cache.hpp"
 
+#include <cstdint>
 #include <expected>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -69,6 +72,10 @@ struct GieresSegment {
 class GieresClient {
 public:
   explicit GieresClient(std::string base_url);
+  // Shared-cache wiring for for_host: the sticky-fallback endpoint clients
+  // pass one DiskCache instance so the size cap accounts the whole "gieres"
+  // namespace together instead of twice.
+  GieresClient(std::string base_url, std::shared_ptr<foundation::DiskCache> cache);
 
   // orgonity list, 1-based `page`, `q` pre-sanitized, `sort` date|title|duration.
   std::expected<GieresListing, std::string>
@@ -95,8 +102,21 @@ public:
   static std::string sanitize_query(std::string_view q);
 
 private:
+  // fetch_cached GETs `path` with the disk cache beneath the raw fetch:
+  // 200 bodies are stored under the "gieres" namespace keyed by the full URL
+  // and served back while fresh, so repeat requests (tab switches, the day
+  // index, the wall-clock chain probes) skip the LAN server. A miss, an
+  // expired/corrupt entry or an unusable cache dir falls through to the real
+  // fetch — the cache speeds reads up, it never gates them.
+  std::expected<audio::HttpResponse, std::string>
+  fetch_cached(std::string_view path, std::size_t max_bytes,
+               std::chrono::milliseconds timeout, std::int64_t ttl_seconds);
+
   std::string       base_;  // no trailing slash
   audio::HttpClient http_;
+  // for_host shares ONE cache across the sticky-fallback endpoint clients so
+  // the size cap accounts the whole "gieres" namespace together.
+  std::shared_ptr<foundation::DiskCache> cache_;
 };
 
 // Parse functions, exposed for the tests (captured JSON fixtures). Network

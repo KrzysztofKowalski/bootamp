@@ -345,6 +345,32 @@ TEST_CASE("LoadYouTubeMusicWhitespaceCookiesFrom", "[config][load]") {
   CHECK(cfg->ytmusic.cookies_from == "");
 }
 
+TEST_CASE("LoadYouTubeMusicUserAgent", "[config][load]") {
+  const auto dir = set_config_dir("ytm_ua");
+  write_config(dir, "\n[ytmusic]\nuser_agent = \"Mozilla/5.0 (bootamp-test)\"\n");
+  auto cfg = load();
+  REQUIRE(cfg.has_value());
+  CHECK(cfg->ytmusic.user_agent == "Mozilla/5.0 (bootamp-test)");
+}
+
+TEST_CASE("LoadYouTubeMusicWhitespaceUserAgentIsUnset", "[config][load]") {
+  // Same trim rule as cookies_from: whitespace-only counts as unset.
+  const auto dir = set_config_dir("ytm_ua_ws");
+  write_config(dir, "\n[ytmusic]\nuser_agent = \"   \"\n");
+  auto cfg = load();
+  REQUIRE(cfg.has_value());
+  CHECK(cfg->ytmusic.user_agent == "");
+}
+
+TEST_CASE("LoadUserAgentCommentedOutStaysDefault", "[config][load]") {
+  // A commented-out user_agent key must never enable the flag.
+  const auto dir = set_config_dir("ua_comment");
+  write_config(dir, "\n[ytmusic]\n# user_agent = \"ignored\"\n");
+  auto cfg = load();
+  REQUIRE(cfg.has_value());
+  CHECK(cfg->ytmusic.user_agent == "");
+}
+
 TEST_CASE("LoadYTSectionAliasesEnableYTMusic", "[config][load]") {
   for (auto sec : {"yt", "youtube", "ytmusic"}) {
     const auto dir = set_config_dir("yt_" + std::string(sec));
@@ -390,6 +416,30 @@ TEST_CASE("LoadSoundCloudCookiesFrom", "[config][load]") {
   auto cfg = load();
   REQUIRE(cfg.has_value());
   CHECK(cfg->soundcloud.cookies_from == "firefox");
+}
+
+TEST_CASE("LoadSoundCloudUserAgent", "[config][load]") {
+  const auto dir = set_config_dir("sc_ua");
+  write_config(dir, "\n[soundcloud]\nenabled = true\nuser_agent = \"SC-test-ua\"\n");
+  auto cfg = load();
+  REQUIRE(cfg.has_value());
+  CHECK(cfg->soundcloud.user_agent == "SC-test-ua");
+}
+
+TEST_CASE("LoadNetEaseUserAgent", "[config][load]") {
+  const auto dir = set_config_dir("ne_ua");
+  write_config(dir, "\n[netease]\nenabled = true\nuser_agent = \"NetEase-test-ua\"\n");
+  auto cfg = load();
+  REQUIRE(cfg.has_value());
+  CHECK(cfg->netease.user_agent == "NetEase-test-ua");
+}
+
+TEST_CASE("DefaultUserAgentUnset", "[config]") {
+  // Empty by default everywhere: no --user-agent flag without config.
+  Config c = default_config();
+  CHECK(c.ytmusic.user_agent == "");
+  CHECK(c.soundcloud.user_agent == "");
+  CHECK(c.netease.user_agent == "");
 }
 
 TEST_CASE("LoadSimplified", "[config][load]") {

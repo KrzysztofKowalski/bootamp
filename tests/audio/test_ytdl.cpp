@@ -40,6 +40,7 @@ using bootamp::audio::YtdlpPipeStreamer;
 using bootamp::audio::make_null_sink;
 using bootamp::audio::probe_ytdlp_duration;
 using bootamp::audio::set_ytdl_cookies_from;
+using bootamp::audio::set_ytdl_user_agent;
 using bootamp::audio::ytdlp_available;
 
 namespace fs = std::filesystem;
@@ -245,7 +246,8 @@ const std::string kFfmpegSuffix32 =
 
 TEST_CASE("ytdl decode_ytdlp_pipe spawns yt-dlp | ffmpeg with the exact Go argv",
           "[ytdl]") {
-  set_ytdl_cookies_from("");  // restore the global for a clean start
+  set_ytdl_cookies_from("");  // restore the globals for a clean start
+  set_ytdl_user_agent("");
   FakeTools ft;
   const std::string url = "https://youtu.be/abc";
 
@@ -291,6 +293,19 @@ TEST_CASE("ytdl decode_ytdlp_pipe spawns yt-dlp | ffmpeg with the exact Go argv"
     (*r)->close();
   }
 
+  // User-Agent override (bootamp addition; empty global = no flag).
+  {
+    set_ytdl_user_agent("bootamp-test-ua");
+    auto r = YtdlpPipeStreamer::decode_ytdlp_pipe(url, 44100, 16, 0);
+    REQUIRE(r.has_value());
+    CHECK(read_lines(ft.file("ytdlp.argv")).at(4) ==
+          kYtDlpBase + " --user-agent bootamp-test-ua " + url);
+    CHECK(read_lines(ft.file("ffmpeg.argv")).at(4) ==
+          std::string("ffmpeg ") + kFfmpegSuffix16);
+    (*r)->close();
+    set_ytdl_user_agent("");
+  }
+
   // Missing yt-dlp → the LookPath error, not a spawn error.
   {
     FakeTools empty(false, true);  // empty dir, PATH = dir only
@@ -306,6 +321,7 @@ TEST_CASE("ytdl decode_ytdlp_pipe spawns yt-dlp | ffmpeg with the exact Go argv"
 
 TEST_CASE("ytdl decode prefill surfaces the cause, preferring yt-dlp", "[ytdl]") {
   set_ytdl_cookies_from("");
+  set_ytdl_user_agent("");
   const std::string url = "https://youtu.be/abc";
 
   // Both children fail: yt-dlp's reason wins (bot wall > ffmpeg decode err).
@@ -380,6 +396,7 @@ TEST_CASE("ytdl decode prefill surfaces the cause, preferring yt-dlp", "[ytdl]")
 
 TEST_CASE("ytdl probe_ytdlp_duration parses --print duration output", "[ytdl]") {
   set_ytdl_cookies_from("");
+  set_ytdl_user_agent("");
   FakeTools ft;
   const std::string url = "https://youtu.be/abc";
 
@@ -408,6 +425,17 @@ TEST_CASE("ytdl probe_ytdlp_duration parses --print duration output", "[ytdl]") 
   CHECK(probe_argv.back() ==
         "yt-dlp --skip-download --no-playlist --socket-timeout 10 --print "
         "duration --cookies-from-browser chrome " + url);
+
+  // UA-only probe argv (bootamp addition; cookies cleared above).
+  set_ytdl_user_agent("bootamp-test-ua");
+  set_env("YTDLP_PROBE_OUTPUT", "98");
+  CHECK(probe_ytdlp_duration(url).count() == Catch::Approx(98.0));
+  set_ytdl_user_agent("");
+  const std::vector<std::string> probe_argv_ua = read_lines(ft.file("ytdlp.argv"));
+  REQUIRE_FALSE(probe_argv_ua.empty());
+  CHECK(probe_argv_ua.back() ==
+        "yt-dlp --skip-download --no-playlist --socket-timeout 10 --print "
+        "duration --user-agent bootamp-test-ua " + url);
 
   // Missing yt-dlp → 0 (spawn fails inside the probe).
   {
@@ -468,6 +496,7 @@ TEST_CASE("ytdl is_ytdl routes the YT/SC/Bandcamp/Bilibili family", "[ytdl]") {
 
 TEST_CASE("ytdl engine seek_ytdl restarts the pipe with input-side -ss", "[ytdl][engine]") {
   set_ytdl_cookies_from("");
+  set_ytdl_user_agent("");
   FakeTools ft;
   set_env("YTDLP_INFINITE", "1");  // endless PCM — the loop never blocks
   set_env("YTDLP_PROBE_OUTPUT", "123.5\n");
@@ -520,6 +549,7 @@ TEST_CASE("ytdl engine seek_ytdl restarts the pipe with input-side -ss", "[ytdl]
 
 TEST_CASE("ytdl engine cancel_seek_ytdl discards the in-flight build", "[ytdl][engine]") {
   set_ytdl_cookies_from("");
+  set_ytdl_user_agent("");
   FakeTools ft;
   set_env("YTDLP_INFINITE", "1");   // old stream keeps running forever
   set_env("YTDLP_PROBE_OUTPUT", "123.5\n");

@@ -10,7 +10,7 @@
 // exact Go argument list:
 //
 //   yt-dlp --flat-playlist -j --socket-timeout 15 [--cookies-from-browser B]
-//          [--playlist-start S+1 --playlist-end E] <url>
+//          [--user-agent UA] [--playlist-start S+1 --playlist-end E] <url>
 //
 // bounded by a 30s timeout (context.WithTimeout in Go). stdout is parsed as
 // newline-delimited JSON into Track{path,title,artist,stream=true,
@@ -469,9 +469,10 @@ resolve_ytdl_with_bounds(std::string_view url, int start, int end) {
         std::string("yt-dlp not found in PATH — see https://github.com/yt-dlp/yt-dlp#installation"));
   }
 
-  // Exact Go argument order (resolve.go:674-691):
+  // Exact Go argument order (resolve.go:674-691), plus bootamp's --user-agent
+  // (emitted only when configured):
   // --flat-playlist -j --socket-timeout 15 [--cookies-from-browser B]
-  // [--playlist-start S+1 --playlist-end E] <url>
+  // [--user-agent UA] [--playlist-start S+1 --playlist-end E] <url>
   std::vector<std::string> args;
   args.emplace_back("yt-dlp");
   args.emplace_back("--flat-playlist");
@@ -482,6 +483,11 @@ resolve_ytdl_with_bounds(std::string_view url, int start, int end) {
   if (!browser.empty()) {
     args.emplace_back("--cookies-from-browser");
     args.push_back(std::move(browser));
+  }
+  std::string ua = detail::trim_space(ytdl_user_agent());
+  if (!ua.empty()) {
+    args.emplace_back("--user-agent");
+    args.push_back(std::move(ua));
   }
   if (start > 0) {
     args.emplace_back("--playlist-start");
