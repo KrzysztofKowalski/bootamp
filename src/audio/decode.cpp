@@ -8,7 +8,13 @@
 // (decode_with_ext_source). probe_frames uses ffprobe.
 //
 // Hot path: stream() never throws, never allocates per call (staging buffers
-// reused), no locks. NaN/Inf preserved (no fast-math).
+// reused). The library-backed decoders serialize stream/seek/position/close
+// with a mutex: the engine closes drained pipelines on an async closer thread
+// (AudioEngine::async_close) while the audio loop may still be inside a
+// concurrent stream() call on the same decoder — without the lock, sf_close /
+// FLAC__stream_decoder_delete / ov_clear run against a live sf_read_float /
+// process_single / ov_read_float and smash the heap (the "malloc(): unaligned
+// tcache chunk" aborts in test_audio). NaN/Inf preserved (no fast-math).
 
 #include "audio/decode.hpp"
 
@@ -33,6 +39,7 @@
 #include <expected>
 #include <fcntl.h>
 #include <memory>
+#include <mutex>
 #include <poll.h>
 #include <set>
 #include <span>
@@ -268,6 +275,9 @@ public:
   ~SndfileDecoder() override { close(); }
 
   std::pair<std::size_t, bool> stream(std::span<Frame> dst) override {
+    // Serializes against close() from the engine's async closer thread (see
+    // the file-header note): sf_close must never run under a live sf_read.
+    std::lock_guard<std::mutex> lk(mu_);
     if (f_ == nullptr) return {0, false};
     std::size_t want = dst.size();
     staging_.resize(want * static_cast<std::size_t>(channels_));
@@ -294,14 +304,19 @@ public:
     return {nframes, more};
   }
 
-  std::string err() const override { return err_; }
+  std::string err() const override {
+    std::lock_guard<std::mutex> lk(mu_);
+    return err_;
+  }
   std::size_t len() const override { return frames_; }
   std::size_t position() const override {
+    std::lock_guard<std::mutex> lk(mu_);
     if (!seekable_ || f_ == nullptr) return pos_frames_;
     sf_count_t p = ::sf_seek(f_, 0, SEEK_CUR);
     return p < 0 ? pos_frames_ : static_cast<std::size_t>(p);
   }
   std::string seek(std::size_t frame) override {
+    std::lock_guard<std::mutex> lk(mu_);
     if (!seekable_ || f_ == nullptr) return {};  // no-op for non-seekable
     if (frames_ > 0 && frame > frames_) frame = frames_;
     if (::sf_seek(f_, static_cast<sf_count_t>(frame), SEEK_SET) < 0) {
@@ -311,6 +326,7 @@ public:
     return {};
   }
   void close() override {
+    std::lock_guard<std::mutex> lk(mu_);
     if (f_ != nullptr) {
       ::sf_close(f_);
       f_ = nullptr;
@@ -335,6 +351,9 @@ private:
   std::size_t                    pos_frames_ = 0;
   std::vector<float>             staging_;
   std::string                    err_;
+  // Guards the SNDFILE handle + staging/err against the async closer thread
+  // (close/seek/position from other threads, stream on the audio thread).
+  mutable std::mutex             mu_;
 };
 
 // ---- libFLAC decoder --------------------------------------------------------
@@ -375,6 +394,10 @@ public:
   ~FlacDecoder() override { close(); }
 
   std::pair<std::size_t, bool> stream(std::span<Frame> dst) override {
+    // Serializes against close() from the engine's async closer thread (see
+    // the file-header note): FLAC__stream_decoder_delete must never run under
+    // a live process_single.
+    std::lock_guard<std::mutex> lk(mu_);
     std::size_t want = dst.size();
     std::size_t written = 0;
     while (written < want) {
@@ -401,10 +424,17 @@ public:
     return {written, written == want};
   }
 
-  std::string err() const override { return err_; }
+  std::string err() const override {
+    std::lock_guard<std::mutex> lk(mu_);
+    return err_;
+  }
   std::size_t len() const override { return total_samples_; }
-  std::size_t position() const override { return emitted_; }
+  std::size_t position() const override {
+    std::lock_guard<std::mutex> lk(mu_);
+    return emitted_;
+  }
   std::string seek(std::size_t frame) override {
+    std::lock_guard<std::mutex> lk(mu_);
     if (!seekable_ || dec_ == nullptr) return {};  // no-op for non-seekable
     if (total_samples_ > 0 && frame > total_samples_) frame = total_samples_;
     if (!::FLAC__stream_decoder_seek_absolute(dec_, static_cast<FLAC__uint64>(frame))) {
@@ -416,6 +446,7 @@ public:
     return {};
   }
   void close() override {
+    std::lock_guard<std::mutex> lk(mu_);
     if (dec_ != nullptr) {
       ::FLAC__stream_decoder_delete(dec_);
       dec_ = nullptr;
@@ -527,6 +558,10 @@ private:
   bool                        seekable_      = false;
   bool                        eof_           = false;
   std::string                 err_;
+  // Guards the libFLAC decoder + out_/err_ against the engine's async closer
+  // thread (close/seek/position from other threads, stream on the audio
+  // thread — error_cb runs under it via process_single).
+  mutable std::mutex          mu_;
 };
 
 // ---- libvorbis (vorbisfile) decoder -----------------------------------------
@@ -595,6 +630,9 @@ public:
   ~VorbisDecoder() override { close(); }
 
   std::pair<std::size_t, bool> stream(std::span<Frame> dst) override {
+    // Serializes against close() from the engine's async closer thread (see
+    // the file-header note): ov_clear must never run under a live ov_read.
+    std::lock_guard<std::mutex> lk(mu_);
     std::size_t want = dst.size();
     if (want == 0 || client_ == nullptr) return {0, false};
     float** chans = nullptr;
@@ -625,21 +663,30 @@ public:
     return {static_cast<std::size_t>(n), static_cast<std::size_t>(n) == want};
   }
 
-  std::string err() const override { return client_->err; }
+  std::string err() const override {
+    std::lock_guard<std::mutex> lk(mu_);
+    return client_ ? client_->err : std::string{};
+  }
   std::size_t len() const override {
-    if (!seekable_) return 0;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!seekable_ || client_ == nullptr) return 0;
     ogg_int64_t total = ::ov_pcm_total(&vf_, -1);
     return total < 0 ? 0 : static_cast<std::size_t>(total);
   }
   std::size_t position() const override {
+    std::lock_guard<std::mutex> lk(mu_);
     if (!seekable_) return pos_frames_;
     ogg_int64_t p = ::ov_pcm_tell(&vf_);
     return p < 0 ? pos_frames_ : static_cast<std::size_t>(p);
   }
   std::string seek(std::size_t frame) override {
-    if (!seekable_) return {};  // no-op for non-seekable
-    std::size_t total = len();
-    if (total > 0 && frame > total) frame = total;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!seekable_ || client_ == nullptr) return {};  // no-op for non-seekable
+    // len() inlined: it would re-lock mu_ (non-recursive) and deadlock.
+    ogg_int64_t total = ::ov_pcm_total(&vf_, -1);
+    if (total > 0 && frame > static_cast<std::size_t>(total)) {
+      frame = static_cast<std::size_t>(total);
+    }
     if (::ov_pcm_seek(&vf_, static_cast<ogg_int64_t>(frame)) != 0) {
       return "vorbis seek failed";
     }
@@ -647,6 +694,7 @@ public:
     return {};
   }
   void close() override {
+    std::lock_guard<std::mutex> lk(mu_);
     if (client_ == nullptr) return;
     if (opened_) {
       if (!vf_closed_) {
@@ -674,6 +722,10 @@ private:
   bool                          seekable_      = false;
   bool                          vf_closed_     = false;
   bool                          opened_        = false;
+  // Guards the OggVorbis_File handle + client_->err against the engine's
+  // async closer thread (close/seek/position from other threads, stream on
+  // the audio thread).
+  mutable std::mutex            mu_;
 };
 
 // ---- native dispatch --------------------------------------------------------

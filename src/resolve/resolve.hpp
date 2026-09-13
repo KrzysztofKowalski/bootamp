@@ -40,6 +40,11 @@ void set_expand_yt_playlist(bool v);
 void set_ytdl_cookies_from(std::string_view browser);
 std::string_view ytdl_cookies_from();
 
+// set_ytdl_user_agent configures yt-dlp --user-agent for resolve (bootamp
+// addition). Empty = disable (no flag emitted).
+void set_ytdl_user_agent(std::string_view ua);
+std::string_view ytdl_user_agent();
+
 // resolve_m3u fetches (≤1MB) and parses a remote .m3u/.m3u8 playlist.
 std::expected<std::vector<playlist::Track>, std::string>
 resolve_m3u(std::string_view url);

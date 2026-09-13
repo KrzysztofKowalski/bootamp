@@ -21,9 +21,11 @@ struct ResumeState {
   int         position_sec = 0;  // last playback position in seconds
   std::string playlist;          // playlist name, if any
   // bootamp: the panel the session left open (cliamp has no screen state).
-  // screen is "" for the main frame, "gieres" for the archive browser (p) or
-  // "radio" for the radio browse screen (R). screen_tab holds the Gieres tab
-  // — "live" | "orgonity" | "echelon" — and stays empty for every other
+  // screen is "" for the main frame, "gieres" for the archive browser (p),
+  // "yt" for the YouTube browser (y) or "radio" for the radio browse screen
+  // (R). screen_tab holds the screen-specific panel state: the Gieres tab —
+  // "live" | "orgonity" | "echelon" — or the YouTube view + last target +
+  // cursor (see screens/yt.hpp resume_tab), and stays empty for every other
   // screen.
   std::string screen;
   std::string screen_tab;

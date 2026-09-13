@@ -259,6 +259,10 @@ void read_ytmusic(const toml::table& t, YouTubeMusicConfig& y) {
     // Go: strings.TrimSpace(parseString(val)); whitespace-only becomes "".
     if (auto s = str_from_node(*v)) y.cookies_from = std::string(trim(*s));
   }
+  if (auto* v = t["user_agent"].node()) {
+    // Same trim rule as cookies_from: whitespace-only counts as unset.
+    if (auto s = str_from_node(*v)) y.user_agent = std::string(trim(*s));
+  }
   if (auto* v = t["expand_playlist"].node()) {
     if (auto b = bool_from_node(*v)) y.expand_playlist = *b;
   }
@@ -276,12 +280,18 @@ void read_soundcloud(const toml::table& t, SoundCloudConfig& s) {
   if (auto* v = t["cookies_from"].node()) {
     if (auto sv = str_from_node(*v)) s.cookies_from = std::string(trim(*sv));
   }
+  if (auto* v = t["user_agent"].node()) {
+    if (auto sv = str_from_node(*v)) s.user_agent = std::string(trim(*sv));
+  }
 }
 
 void read_netease(const toml::table& t, NetEaseConfig& n) {
   if (auto* v = t["enabled"].node())      n.enabled = enabled_true_only(*v);
   if (auto* v = t["cookies_from"].node()) {
     if (auto sv = str_from_node(*v)) n.cookies_from = std::string(trim(*sv));
+  }
+  if (auto* v = t["user_agent"].node()) {
+    if (auto sv = str_from_node(*v)) n.user_agent = std::string(trim(*sv));
   }
   if (auto* v = t["user_id"].node())      n.user_id = str_from_node(*v).value_or(n.user_id);
 }
@@ -367,7 +377,7 @@ void Config::clamp() {
   spotify.bitrate   = clamp_spotify_bitrate(spotify.bitrate);
   padding_h         = std::clamp(padding_h, 0, 10);
   padding_v         = std::clamp(padding_v, 0, 5);
-  if (gieres_base_url.empty()) gieres_base_url = "https://gieres.cytr.us";
+  if (gieres_base_url.empty()) gieres_base_url = "http://192.168.1.154:13080";
   if (low_power) visualizer = "none";
 }
 

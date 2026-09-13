@@ -39,6 +39,11 @@ std::atomic<bool> g_expand_yt_playlist{true};
 // on the resolve hot path, matching the Go design).
 std::atomic<const char*> g_ytdl_cookies{nullptr};
 
+// yt-dlp --user-agent override (bootamp addition; Go has no equivalent
+// global — kept in sync with audio::ytdl's global by main). Empty = unset →
+// no --user-agent flag is emitted. Same leak-per-store scheme as cookies.
+std::atomic<const char*> g_ytdl_ua{nullptr};
+
 // Go maxM3UBody — caps how much of a remote playlist is read before
 // classifying it. HLS/M3U playlists are tiny (a few KB); 1 MB is generous.
 constexpr std::size_t kMaxM3UBody = 1 << 20;
@@ -352,6 +357,16 @@ void set_ytdl_cookies_from(std::string_view browser) {
 
 std::string_view ytdl_cookies_from() {
   const char* p = g_ytdl_cookies.load(std::memory_order_acquire);
+  return p != nullptr ? std::string_view(p) : std::string_view{};
+}
+
+void set_ytdl_user_agent(std::string_view ua) {
+  auto* s = new std::string(ua);
+  g_ytdl_ua.store(s->c_str(), std::memory_order_release);
+}
+
+std::string_view ytdl_user_agent() {
+  const char* p = g_ytdl_ua.load(std::memory_order_acquire);
   return p != nullptr ? std::string_view(p) : std::string_view{};
 }
 

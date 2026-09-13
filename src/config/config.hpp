@@ -4,8 +4,9 @@
 // Port of cliamp/config/config.go. The Go config is ~39 fields plus nested
 // provider structs (Navidrome/Spotify/Qobuz/Tidal/YouTubeMusic/SoundCloud/
 // NetEase/Plex/Jellyfin/Emby/Audiobookshelf). bootamp adds Provider, BufferMs,
-// ytmusic.cookies_from, soundcloud.cookies_from per the plan, and keeps the
-// same defaults, clamping, and $ENV interpolation rules.
+// ytmusic.cookies_from, soundcloud.cookies_from, ytmusic/soundcloud/netease
+// user_agent per the plan, and keeps the same defaults, clamping, and $ENV
+// interpolation rules.
 #pragma once
 
 #include <array>
@@ -72,6 +73,7 @@ struct YouTubeMusicConfig {
   std::string          client_id;
   std::string          client_secret;
   std::string          cookies_from;    // browser name for yt-dlp
+  std::string          user_agent;      // yt-dlp --user-agent (empty = not set)
   std::optional<bool>  expand_playlist;
   bool is_set_or_fallback(/*fallback_fn*/ std::string_view fb_id,
                           std::string_view fb_secret) const {
@@ -96,6 +98,7 @@ struct SoundCloudConfig {
   bool        enabled      = false;
   std::string user;
   std::string cookies_from;
+  std::string user_agent;  // yt-dlp --user-agent (empty = not set)
   bool is_set() const { return enabled; }
 };
 
@@ -103,6 +106,7 @@ struct SoundCloudConfig {
 struct NetEaseConfig {
   bool        enabled      = false;
   std::string cookies_from;
+  std::string user_agent;  // yt-dlp --user-agent (empty = not set)
   std::string user_id;
   bool is_set() const { return enabled; }
 };
@@ -153,7 +157,7 @@ struct AudiobookshelfConfig {
 
 // Config — the full user-preference struct (~39 fields). Field order and
 // semantics match cliamp's Config 1:1; added: Provider, BufferMs,
-// YouTubeMusic.CookiesFrom, SoundCloud.CookiesFrom.
+// YouTubeMusic.CookiesFrom, SoundCloud.CookiesFrom, user_agent fields.
 struct Config {
   // Audio controls
   double                 volume            = 0.0;    // dB, clamped [VolumeMin, +6]
@@ -172,7 +176,7 @@ struct Config {
   std::string provider;          // "radio"/"navidrome"/"spotify"/... (default "radio")
   std::string theme;
   std::string visualizer;        // "" = default (Bars)
-  std::string gieres_base_url = "https://gieres.cytr.us";  // Giereś archive (p); LAN via gieres.ini
+  std::string gieres_base_url = "http://192.168.1.154:13080";  // Giereś archive (p)
 
   // Output device / resampling
   int          sample_rate      = 0;     // 0 = auto-detect; else 22050/44100/48000/96000/192000

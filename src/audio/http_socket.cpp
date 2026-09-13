@@ -847,11 +847,6 @@ bool read_line(ByteCursor& cur, std::string& out, std::size_t cap) {
   }
 }
 
-std::string trim_right(std::string_view s) {
-  while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.remove_suffix(1);
-  return std::string(s);
-}
-
 }  // namespace
 
 std::expected<HttpResponse, std::string> parse_response(ByteSource& src) {
@@ -901,11 +896,13 @@ std::expected<HttpResponse, std::string> parse_response(ByteSource& src) {
     if (l.empty()) break;  // end of headers
 
     if (l.front() == ' ' || l.front() == '\t') {
-      // obs-fold continuation: append to the previous header value (Go
-      // textproto joins with a space).
+      // obs-fold continuation: append to the previous header value. Go
+      // textproto (readContinuedLineSlice) skips the continuation line's
+      // leading whitespace and joins with exactly one space, so "a\r\n  b"
+      // folds to "a b" regardless of the indentation width.
       if (last_key.empty() || resp.headers.empty())
         return std::unexpected("malformed MIME header line \"" + l + "\"");
-      resp.headers.back().second += " " + trim_right(l);
+      resp.headers.back().second += " " + std::string(trim_ws(l));
       continue;
     }
     const std::size_t colon = l.find(':');

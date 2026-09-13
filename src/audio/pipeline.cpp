@@ -314,7 +314,12 @@ private:
   bool                      ok_       = false;
   bool                      eof_      = false;
   std::vector<Frame>        staging_{std::size_t{4096}};
-  std::vector<float>        in_buf_{std::size_t{4096} * 2};
+  // staging_ above uses braces because Frame = array<float,2> cannot be built
+  // from a scalar, so list-init falls back to the size ctor (4096 frames).
+  // in_buf_ MUST use the plain parens size ctor: with braces, {8192} picks the
+  // initializer_list<float> ctor and in_buf_ would hold ONE float (8192.0f),
+  // and the copy loop below writes in_buf_[0..8191] — a heap smash.
+  std::vector<float>        in_buf_ = std::vector<float>(std::size_t{4096} * 2);
   std::vector<float>        out_buf_;
   std::ptrdiff_t            out_rd_   = 0;  // drained position in out_buf_
   std::ptrdiff_t            out_wr_   = 0;  // produced end in out_buf_
