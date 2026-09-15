@@ -1,5 +1,7 @@
 # bootamp — terminal music player
 
+![KOTEK](./image0.webp)
+
 C++23 + SIMD rewrite of [cliamp](https://github.com/KrzysztofKowalski/cliamp) (Go + Bubbletea terminal music player): fast, tiny CPU/memory footprint.
 
 On an old Intel MacBook, bootamp uses ~4% CPU where the Go original (cliamp) used 40%+.
