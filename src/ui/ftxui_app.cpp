@@ -412,6 +412,12 @@ void FtxuiAppImpl::set_tick_context(VisTickContext ctx) {
   ticks_->set_context(std::move(ctx));
 }
 
+void FtxuiAppImpl::set_text_input_active(TextInputActive fn) {
+  // Loop thread only, set before run() (same lifetime as on_key_); never
+  // modified while the loop is dispatching keys.
+  text_input_active_ = std::move(fn);
+}
+
 void FtxuiAppImpl::set_overlay_component(
     std::shared_ptr<ftxui::ComponentBase> overlay) {
   overlay_ = std::move(overlay);
@@ -566,20 +572,26 @@ bool FtxuiAppImpl::on_event(const ftxui::Event& e) {
 }
 
 bool FtxuiAppImpl::handle_key_name(const std::string& name) {
+  // Text-input gate: while the host is editing text (URL overlay, search
+  // prompts, the YouTube prompt, the help filter — wired via
+  // set_text_input_active), printable keys must become input text, so the
+  // shell's app-owned toggles (v/V/o/q) yield to the active editor instead of
+  // swallowing 'o'/'v' from typed and pasted URLs. Unwired = never typing.
+  const bool typing = text_input_active_ && text_input_active_();
   // App-owned keys (the fixed interface gives the caller no channel to these
   // and the tick wake must happen in-process):
-  if (name == "v") {
+  if (!typing && name == "v") {
     vis_.cycle_mode();
     vis_.request_refresh();
     ticks_->wake();
     return true;
   }
-  if (name == "V") {
+  if (!typing && name == "V") {
     fullscreen_.store(!fullscreen_.load());
     ticks_->wake();
     return true;
   }
-  if (name == "o") {
+  if (!typing && name == "o") {
     // Vis-off toggle: None renders nothing — render() returns false, so the
     // tick loop stops blitting and an idle window uses ~0% vis CPU. The
     // current mode is saved and restored on the next `o`. The frame change
@@ -608,6 +620,14 @@ bool FtxuiAppImpl::handle_key_name(const std::string& name) {
   // q / ctrl+c: forwarded first (pre-exit cleanup), then quit. FTXUI is told
   // the event is handled so it does not raise SIGINT on ctrl+c.
   if (name == "q" || name == "ctrl+c") {
+    if (typing) {
+      // Editing text: the key is input (URL/search text 'q') or a no-op for
+      // the active editor (ctrl+c) — forward without quitting mid-edit.
+      if (on_key_) {
+        on_key_(name);
+      }
+      return true;
+    }
     if (on_key_) {
       on_key_(name);
     }

@@ -4,7 +4,7 @@
 // (ui/screens/gieres.hpp — fetch lifecycle, tabbed views, prompt, cursor
 // handling) and the browse screen's net-search playback wiring. Three tabbed
 // views, each driven through ONE prompt ("/"):
-//   * Search   — yt-dlp ytsearch:N via resolve::resolve_ytdl (ytsearch:20:).
+//   * Search   — yt-dlp ytsearchN: via resolve::resolve_ytdl (ytsearch20:).
 //   * Playlists — a public playlist URL ("https://www.youtube.com/playlist?list=…").
 //   * Feeds    — a VIDEO LIST URL (a channel "/@handle/videos", the
 //     subscriptions / history / trending feeds). With the cookies and UA that
@@ -214,7 +214,7 @@ private:
   // single-flight; the request key snapshots the state it was launched for.
   void fetch();
   // refetch_target is the resolve string for the active view: the raw target
-  // with the ytsearch:N prefix applied for Search.
+  // with the ytsearchN: prefix applied for Search.
   std::string current_target() const;
   // cache_key derives the on-disk cache key ("yt-search/<fp>" |
   // "yt-playlist/<fp>" | "yt-feed/<fp>") for the active view's target — the
@@ -244,7 +244,7 @@ private:
 
   // The active target: query_ is the RAW user-submitted text (what the "/"
   // prompt re-edits across cycles); current_target() derives the resolve
-  // string (ytsearch:N: prefix for Search). tracks_ is the shown list,
+  // string (ytsearchN: prefix for Search). tracks_ is the shown list,
   // from_cache_ remembers where it came from. Each view parks its own
   // target/list/cursor in saved_ on a tab switch and reloads it on return —
   // the gieres per-view-data rule (a tab never shows another tab's list).
@@ -277,7 +277,7 @@ private:
   struct FetchResult {
     View        view;
     std::string query;   // the RAW target the fetch was launched for (staleness)
-    std::string target;  // the resolve string snapshot (ytsearch:N: applied)
+    std::string target;  // the resolve string snapshot (ytsearchN: applied)
     std::string cache;   // the cache key it used
     bool        force = false;  // ctrl+r: skip the cache read on this fetch
     bool        ok = false;

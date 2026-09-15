@@ -91,6 +91,15 @@ public:
   // so the tick loop idles while unfocused. Thread-safe (atomic load).
   bool focused() const { return focused_.load(); }
 
+  // set_text_input_active installs a predicate the shell consults before its
+  // app-owned keys (v/V/o/q): while the host is editing text (URL overlay,
+  // jump prompt, browse/gieres search, the YouTube prompt, the help filter)
+  // those keys must reach the input buffer as text instead of firing the
+  // shell's global actions. Unwired (or false) keeps the current behavior.
+  // Must be called before run().
+  using TextInputActive = std::function<bool()>;
+  void set_text_input_active(TextInputActive fn);
+
 #if BOOTAMP_HAS_FTXUI
   // set_overlay_component installs the screens composite (queue/help/browse/
   // eq overlays built by the wiring agent from ui/screens/*.hpp factories).
@@ -231,6 +240,9 @@ private:
   Visualizer&              vis_;
   FtxuiApp::KeyCallback    on_key_;
   FtxuiApp::StatusProvider status_;
+  // Text-input predicate (set via set_text_input_active; loop thread only,
+  // set before run() — same lifetime as on_key_).
+  TextInputActive text_input_active_;
   std::unique_ptr<TickLoop> ticks_;
 
   std::mutex        grid_mu_;

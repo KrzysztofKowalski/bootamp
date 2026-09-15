@@ -68,7 +68,10 @@ if [[ ! -f "$BUILD/CMakeCache.txt" ]]; then
     echo "test.sh: $BUILD has no CMakeCache.txt — run without --no-build first" >&2
     exit 1
   fi
-  cmake -S "$ROOT" -B "$BUILD"
+  # Explicitly pin the C++ compiler to g++: the default CMAKE_CXX_COMPILER
+  # (/usr/bin/c++) may resolve to a different compiler on other setups; the
+  # user requires g++.
+  cmake -S "$ROOT" -B "$BUILD" -DCMAKE_CXX_COMPILER=g++
 fi
 
 if [[ "$no_build" == false ]]; then

@@ -56,7 +56,10 @@ for arg in "$@"; do
   esac
 done
 
-cmake -B "$BUILD_DIR" "${CMAKE_ARGS[@]}"
+# Explicitly pin the C++ compiler to g++: the default CMAKE_CXX_COMPILER
+# (/usr/bin/c++) may resolve to a different compiler on other setups; the
+# user requires g++.
+cmake -B "$BUILD_DIR" -DCMAKE_CXX_COMPILER=g++ "${CMAKE_ARGS[@]}"
 
 # No fast-fail: -k keeps the build going through errors so one target doesn't
 # hide the rest; full output lands in build.log for triage (fresh each run).

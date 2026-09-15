@@ -327,7 +327,11 @@ void YtModel::restore_view(const View v) {
 
 std::string YtModel::current_target() const {
   if (view_ == View::Search) {
-    return "ytsearch:" + std::to_string(kSearchCount) + ":" + query_;
+    // yt-dlp search-key spelling: the count sits right after "ytsearch" with
+    // NO separating colon ("ytsearch20:query" — Go keys.go ytsearch10:). A
+    // "ytsearch:20:query" form reads as prefix-empty, so yt-dlp would search
+    // for the literal text "20:query".
+    return "ytsearch" + std::to_string(kSearchCount) + ":" + query_;
   }
   return query_;  // Playlists / Feeds: query_ IS the pasted URL
 }

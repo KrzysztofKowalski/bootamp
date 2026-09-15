@@ -2104,6 +2104,32 @@ int run(config::Overrides overrides, std::vector<std::string> positional) {
         });
   }
 
+  // Text-input predicate for the shell (set_text_input_active): while one of
+  // the host's text editors is active the shell must forward v/V/o/q as input
+  // text instead of toggling the visualizer (typing "youtube.com/watch?v="
+  // otherwise loses every 'o' and 'v'). Mirror the same channels that consume
+  // printable chars in app_key: the URL overlay, the jump prompt, browse/
+  // gieres search, the YouTube prompt, and the help filter.
+  if (app_impl) {
+    app_impl->set_text_input_active([&screen_refs]() {
+      if (screen_refs.url.active() || screen_refs.jump.active()) {
+        return true;
+      }
+      switch (screen_refs.mode) {
+        case UiMode::Browse:
+          return active_browse(screen_refs).search_active();
+        case UiMode::Gieres:
+          return screen_refs.gieres.search_active();
+        case UiMode::Yt:
+          return screen_refs.yt.prompt_active();
+        case UiMode::Help:
+          return screen_refs.help.filtering();
+        default:
+          return false;
+      }
+    });
+  }
+
 #if BOOTAMP_HAS_FTXUI
   if (app_impl) {
     // The screens composite: renders the active screen's component (the
